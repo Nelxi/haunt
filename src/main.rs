@@ -1,0 +1,41 @@
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod app;
+mod config;
+mod fonts;
+mod secrets;
+mod session;
+mod termview;
+mod theme;
+
+use eframe::egui;
+
+fn main() -> eframe::Result {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
+    // Network I/O runs on a small dedicated runtime; the UI thread never blocks on it.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("haunt-net")
+        .enable_all()
+        .build()
+        .expect("failed to start the async runtime");
+    let handle = runtime.handle().clone();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("haunt")
+            .with_app_id("haunt")
+            .with_inner_size([1180.0, 740.0])
+            .with_min_inner_size([620.0, 380.0]),
+        ..Default::default()
+    };
+
+    let result = eframe::run_native(
+        "haunt",
+        options,
+        Box::new(move |cc| Ok(Box::new(app::HauntApp::new(cc, handle)))),
+    );
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    result
+}

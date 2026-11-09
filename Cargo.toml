@@ -16,12 +16,15 @@ env_logger = "0.11.11"
 keyring = "4.2.0"
 log = "0.4.35"
 parking_lot = "0.13.0"
+raw-window-handle = "0.6"
 rfd = "0.18.0"
 russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa", "flate2"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "fs"] }
 toml = "1.2.1"
 uuid = { version = "1.29.1", features = ["v4", "serde"] }
+window-vibrancy = "0.8.1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
 
 [profile.release]
 opt-level = 3

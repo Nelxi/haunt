@@ -1,7 +1,8 @@
 //! Terminal widget: draws the alacritty grid with the egui painter and turns
 //! keyboard/mouse input into the byte sequences an xterm-compatible host expects.
 
-use std::time::Instant;
+use std::f32::consts::{PI, TAU};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -11,11 +12,14 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, Event, EventFilter, FontFamily, FontId, Key, Modifiers,
-    MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2,
+    self, Align2, Color32, CornerRadius, Event, EventFilter, FontId, Key, Mesh, Modifiers,
+    MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, pos2, vec2,
 };
 
+use crate::anim;
 use crate::config::Settings;
+use crate::fonts;
+use crate::fx;
 use crate::session::{GridSize, Session, Status};
 use crate::theme::{Theme, mix};
 
@@ -27,6 +31,9 @@ pub struct ViewState {
     reported_button: Option<u8>,
     last_report_cell: Option<(usize, usize)>,
     selecting: bool,
+    /// Animated cursor quad (tl, tr, br, bl) and the rect it is heading to.
+    cursor_corners: Option<[Pos2; 4]>,
+    cursor_target: Rect,
 }
 
 impl Default for ViewState {
@@ -37,6 +44,8 @@ impl Default for ViewState {
             reported_button: None,
             last_report_cell: None,
             selecting: false,
+            cursor_corners: None,
+            cursor_target: Rect::NOTHING,
         }
     }
 }
@@ -50,10 +59,16 @@ pub struct Look<'a> {
     pub theme: &'a Theme,
     pub palette: &'a [Color32; 256],
     pub settings: &'a Settings,
+    /// Seconds since start, drives the border rotation.
+    pub time: f32,
+    /// Whether the OS window has focus (animations pause otherwise).
+    pub window_focused: bool,
 }
 
 struct Metrics {
     font: FontId,
+    font_bold: FontId,
+    font_italic: FontId,
     cw: f32,
     ch: f32,
     text_dy: f32,
@@ -99,25 +114,50 @@ pub fn show(ui: &mut egui::Ui, s: &mut Session, look: &Look<'_>, input_enabled: 
         });
     }
 
-    // Pane: rounded card with an accent border when focused (Hyprland-style active border).
-    let painter = ui.painter_at(rect);
-    let border = if focused { theme.accent } else { theme.overlay };
-    painter.rect(
-        rect,
-        CornerRadius::same(set.rounding.clamp(0.0, 30.0) as u8),
-        theme.bg,
-        Stroke::new(set.border_width, border),
-        StrokeKind::Inside,
-    );
+    // Pane: floating rounded card with a glow and an animated gradient border
+    // when focused (Hyprland active border), hairline when not.
+    let painter = ui.painter_at(rect.expand(24.0));
+    let radius = set.rounding.clamp(0.0, 30.0);
+    let focus_t = anim::toggle(ui.ctx(), resp.id.with("focus"), focused, 0.25);
+    if focus_t > 0.0 {
+        fx::glow(&painter, rect, radius, theme.accent.gamma_multiply(0.18 * focus_t), 22.0, 0.0);
+    }
+    painter.rect_filled(rect, CornerRadius::same(radius as u8), theme.bg.gamma_multiply(set.opacity.clamp(0.3, 1.0)));
+    let animate_border = set.border_animation && set.animations && look.window_focused && focused;
+    let angle = if animate_border { look.time * TAU / 3.0 } else { PI / 4.0 };
+    if focus_t > 0.01 {
+        fx::gradient_border(
+            &painter,
+            rect,
+            radius,
+            set.border_width.max(1.0),
+            theme.accent.gamma_multiply(focus_t),
+            theme.accent2.gamma_multiply(focus_t),
+            angle,
+        );
+    }
+    if focus_t < 0.99 {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(radius as u8),
+            Stroke::new(1.0, theme.overlay.gamma_multiply(1.0 - focus_t)),
+            StrokeKind::Inside,
+        );
+    }
+    if animate_border {
+        ui.ctx().request_repaint_after(Duration::from_millis(33));
+    }
 
     let inner = rect.shrink(set.padding + set.border_width);
-    let font = FontId::new(set.font_size, FontFamily::Monospace);
+    let font = fonts::mono(set.font_size);
     let (cw, row_h) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let ch = (row_h * set.line_height).round().max(1.0);
     let cols = ((inner.width() / cw).floor() as usize).max(2);
     let rows = ((inner.height() / ch).floor() as usize).max(1);
     let m = Metrics {
         font,
+        font_bold: fonts::mono_bold(set.font_size),
+        font_italic: fonts::mono_italic(set.font_size),
         cw,
         ch,
         text_dy: ((ch - row_h) / 2.0).round(),
@@ -144,7 +184,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut Session, look: &Look<'_>, input_enabled: 
     }
 
     draw(ui, &painter, s, look, &m, focused);
-    draw_status(ui, &painter, rect, theme, &status);
+    draw_status(ui, &painter, rect, theme, &status, resp.id);
     action
 }
 
@@ -559,11 +599,19 @@ fn resolve(color: AnsiColor, colors: &Colors, look: &Look<'_>) -> Color32 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Face {
+    Regular,
+    Bold,
+    Italic,
+}
+
 struct TextRun {
     row: usize,
     col: usize,
     next_col: usize,
     color: Color32,
+    face: Face,
     text: String,
     ascii: bool,
 }
@@ -631,7 +679,7 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
 
         if flags.intersects(Flags::ALL_UNDERLINES) {
             let r = m.cell_rect(col, row, width);
-            let y = r.max.y - (m.ch * 0.12).max(1.0);
+            let y = (r.max.y - (m.ch * 0.14).max(1.0)).round();
             lines.push((Rect::from_min_max(pos2(r.min.x, y), pos2(r.max.x, y + 1.0)), fg));
         }
         if flags.contains(Flags::STRIKEOUT) {
@@ -644,9 +692,23 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
         if c == ' ' || c == '\0' || c == '\t' {
             continue;
         }
+        let face = if flags.contains(Flags::BOLD) {
+            Face::Bold
+        } else if flags.contains(Flags::ITALIC) {
+            Face::Italic
+        } else {
+            Face::Regular
+        };
         let ascii = c.is_ascii() && width == 1;
         match runs.last_mut() {
-            Some(run) if ascii && run.ascii && run.row == row && run.next_col == col && run.color == fg => {
+            Some(run)
+                if ascii
+                    && run.ascii
+                    && run.row == row
+                    && run.next_col == col
+                    && run.color == fg
+                    && run.face == face =>
+            {
                 run.text.push(c);
                 run.next_col += 1;
             }
@@ -656,7 +718,7 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
                 if let Some(extra) = cell.zerowidth() {
                     text.extend(extra);
                 }
-                runs.push(TextRun { row, col, next_col: col + width, color: fg, text, ascii });
+                runs.push(TextRun { row, col, next_col: col + width, color: fg, face, text, ascii });
             }
         }
     }
@@ -665,46 +727,109 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
         painter.rect_filled(m.cell_rect(col, row, w), 0.0, color);
     }
 
-    // Cursor (block style is drawn under the glyph, which is then repainted in bg color).
-    let blink_on = !set.cursor_blink
-        || !focused
-        || (s.view.blink_epoch.elapsed().as_millis() / 530) % 2 == 0;
-    if set.cursor_blink && focused {
-        let ms = 530 - (s.view.blink_epoch.elapsed().as_millis() % 530) as u64;
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(ms));
-    }
+    // ---- cursor: smooth glide + trail + fading blink
     let crow = cursor.point.line.0 + offset;
+    let visible_row = crow >= 0 && (crow as usize) < m.rows;
     let mut cursor_glyph: Option<(Rect, Color32)> = None;
-    if cursor.shape != CursorShape::Hidden && crow >= 0 && (crow as usize) < m.rows && blink_on {
+    if cursor.shape != CursorShape::Hidden && visible_row {
         let ccol = cursor.point.column.0.min(m.cols - 1);
         let wide = term.grid()[cursor.point].flags.contains(Flags::WIDE_CHAR);
-        let r = m.cell_rect(ccol, crow as usize, if wide { 2 } else { 1 });
+        let cell = m.cell_rect(ccol, crow as usize, if wide { 2 } else { 1 });
         let shape = if focused { cursor.shape } else { CursorShape::HollowBlock };
-        match shape {
-            CursorShape::Block => {
-                painter.rect_filled(r, 2.0, theme.cursor);
-                cursor_glyph = Some((r, theme.bg));
+        let target = match shape {
+            CursorShape::Beam => Rect::from_min_size(cell.min, vec2(2.0, cell.height())),
+            CursorShape::Underline => Rect::from_min_max(pos2(cell.min.x, cell.max.y - 2.0), cell.max),
+            _ => cell,
+        };
+
+        let now = Instant::now();
+        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.05);
+        let view = &mut s.view;
+        if view.cursor_target != target {
+            view.cursor_target = target;
+            view.blink_epoch = now;
+        }
+        let goal = [target.left_top(), target.right_top(), target.right_bottom(), target.left_bottom()];
+        let trail = set.cursor_trail && set.animations;
+        let corners = match view.cursor_corners {
+            Some(mut cur) if trail => {
+                let cur_center = cur.iter().fold(pos2(0.0, 0.0), |a, p| a + p.to_vec2()) / 4.0;
+                let travel = target.center() - cur_center;
+                let len = travel.length();
+                for i in 0..4 {
+                    let tau = if len < 0.5 {
+                        0.03
+                    } else {
+                        let o = (goal[i] - target.center()).normalized();
+                        let lead = (o.dot(travel / len) + 1.0) / 2.0; // 1 = leading corner
+                        0.12 - 0.09 * lead
+                    };
+                    cur[i].x = anim::approach(cur[i].x, goal[i].x, dt, tau);
+                    cur[i].y = anim::approach(cur[i].y, goal[i].y, dt, tau);
+                }
+                cur
             }
-            CursorShape::HollowBlock => {
-                painter.rect_stroke(r.shrink(0.5), 2.0, Stroke::new(1.0, theme.cursor), StrokeKind::Inside);
+            _ => goal,
+        };
+        let moving = corners.iter().zip(goal.iter()).any(|(a, b)| (*a - *b).length() > 0.4);
+        view.cursor_corners = Some(if moving { corners } else { goal });
+        if moving {
+            ui.ctx().request_repaint();
+        }
+
+        // kitty-style blink: solid for a moment after activity, then a smooth fade,
+        // and no blinking after 15 s idle.
+        let idle = view.blink_epoch.elapsed().as_secs_f32();
+        let blinking = set.cursor_blink && focused && look.window_focused && !moving && idle > 0.6 && idle < 15.0;
+        let alpha = if blinking {
+            let phase = ((idle - 0.6) / 1.2).fract();
+            let x = (phase * TAU).cos() * 0.5 + 0.5;
+            anim::smooth(x)
+        } else {
+            1.0
+        };
+        if blinking {
+            ui.ctx().request_repaint_after(Duration::from_millis(33));
+        } else if set.cursor_blink && focused && idle <= 0.6 {
+            ui.ctx().request_repaint_after(Duration::from_secs_f32(0.6 - idle + 0.01));
+        }
+
+        let color = theme.cursor.gamma_multiply(alpha);
+        if moving {
+            let mut mesh = Mesh::default();
+            for p in corners {
+                mesh.colored_vertex(p, theme.cursor.gamma_multiply(0.85));
             }
-            CursorShape::Beam => {
-                painter.rect_filled(Rect::from_min_size(r.min, vec2(2.0, r.height())), 0.0, theme.cursor);
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(Shape::mesh(mesh));
+        } else {
+            match shape {
+                CursorShape::Block => {
+                    painter.rect_filled(target, 2.0, color);
+                    if alpha > 0.5 {
+                        cursor_glyph = Some((cell, theme.bg));
+                    }
+                }
+                CursorShape::HollowBlock => {
+                    painter.rect_stroke(target.shrink(0.5), 2.0, Stroke::new(1.0, theme.cursor), StrokeKind::Inside);
+                }
+                CursorShape::Beam | CursorShape::Underline => {
+                    painter.rect_filled(target, 1.0, color);
+                }
+                CursorShape::Hidden => {}
             }
-            CursorShape::Underline => {
-                painter.rect_filled(
-                    Rect::from_min_max(pos2(r.min.x, r.max.y - 2.0), r.max),
-                    0.0,
-                    theme.cursor,
-                );
-            }
-            CursorShape::Hidden => {}
         }
     }
 
     for run in &runs {
         let r = m.cell_rect(run.col, run.row, 1);
-        painter.text(r.min + vec2(0.0, m.text_dy), Align2::LEFT_TOP, &run.text, m.font.clone(), run.color);
+        let font = match run.face {
+            Face::Regular => &m.font,
+            Face::Bold => &m.font_bold,
+            Face::Italic => &m.font_italic,
+        };
+        painter.text(r.min + vec2(0.0, m.text_dy), Align2::LEFT_TOP, &run.text, font.clone(), run.color);
     }
     // Glyph under a block cursor, in the background color.
     if let Some((r, color)) = cursor_glyph {
@@ -722,8 +847,8 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
         let total = term.grid().total_lines().max(1) as f32;
         let screen = m.rows as f32;
         let track = Rect::from_min_max(
-            pos2(m.origin.x + m.cols as f32 * m.cw + 2.0, m.origin.y),
-            pos2(m.origin.x + m.cols as f32 * m.cw + 5.0, m.origin.y + screen * m.ch),
+            pos2(m.origin.x + m.cols as f32 * m.cw + 3.0, m.origin.y),
+            pos2(m.origin.x + m.cols as f32 * m.cw + 6.0, m.origin.y + screen * m.ch),
         );
         let h = (screen / total * track.height()).max(16.0);
         let top_frac = 1.0 - (offset as f32 + screen) / total;
@@ -731,33 +856,37 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
         painter.rect_filled(
             Rect::from_min_size(pos2(track.min.x, y), vec2(3.0, h)),
             2.0,
-            theme.accent.gamma_multiply(0.6),
+            theme.accent.gamma_multiply(0.7),
         );
     }
 }
 
-fn draw_status(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, theme: &Theme, status: &Status) {
-    let (text, color) = match status {
-        Status::Connected => return,
-        Status::Connecting => ("connecting…".to_string(), theme.warn),
-        Status::Closed(_) => ("disconnected · Enter or R to reconnect".to_string(), theme.err),
-    };
-    let font = FontId::proportional(13.0);
-    let galley = painter.layout_no_wrap(text, font, theme.text);
-    let size = galley.size() + vec2(28.0, 12.0);
-    let pill = Rect::from_center_size(pos2(rect.center().x, rect.max.y - 18.0 - size.y / 2.0), size);
-    painter.rect(
-        pill,
-        CornerRadius::same(255),
-        theme.mantle.gamma_multiply(0.95),
-        Stroke::new(1.0, color),
-        StrokeKind::Inside,
-    );
-    let dot = pos2(pill.min.x + 12.0, pill.center().y);
-    painter.circle_filled(dot, 3.5, color);
-    painter.galley(pill.min + vec2(20.0, 6.0), galley, theme.text);
-    if matches!(status, Status::Connecting) {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+fn draw_status(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, theme: &Theme, status: &Status, id: egui::Id) {
+    let ctx = ui.ctx();
+    let shown = !matches!(status, Status::Connected);
+    let t = ctx.animate_bool_with_time_and_easing(id.with("status-pill"), shown, 0.35, anim::wind);
+    if t <= 0.001 {
+        return;
     }
-    let _ = Vec2::ZERO;
+    let (text, color) = match status {
+        Status::Connecting | Status::Connected => ("connecting…", theme.warn),
+        Status::Closed(_) => ("disconnected  ·  press Enter to reconnect", theme.err),
+    };
+    let galley = painter.layout_no_wrap(text.to_string(), fonts::ui(13.0), theme.text);
+    let size = galley.size() + vec2(36.0, 14.0);
+    let y = rect.max.y - 22.0 - size.y / 2.0 + (1.0 - t) * 24.0;
+    let pill = Rect::from_center_size(pos2(rect.center().x, y), size);
+    let mut p = painter.clone();
+    p.multiply_opacity(t.clamp(0.0, 1.0));
+    fx::glow(&p, pill, size.y / 2.0, color.gamma_multiply(0.25), 16.0, 0.0);
+    p.rect(pill, CornerRadius::same(255), theme.mantle, Stroke::new(1.0, color.gamma_multiply(0.8)), StrokeKind::Inside);
+    let time = ui.input(|i| i.time) as f32;
+    let pulse = if matches!(status, Status::Connecting) { 0.5 + 0.5 * (time * 5.0).sin() } else { 1.0 };
+    let dot = pos2(pill.min.x + 15.0, pill.center().y);
+    p.circle_filled(dot, 6.0 * pulse, color.gamma_multiply(0.25));
+    p.circle_filled(dot, 3.5, color);
+    p.galley(pill.min + vec2(26.0, 7.0), galley, theme.text);
+    if matches!(status, Status::Connecting) {
+        ctx.request_repaint_after(Duration::from_millis(33));
+    }
 }

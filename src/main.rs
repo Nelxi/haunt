@@ -1,12 +1,17 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod anim;
 mod app;
 mod config;
 mod fonts;
+mod fx;
+mod platform;
 mod secrets;
 mod session;
+mod shader;
 mod termview;
 mod theme;
+mod widgets;
 
 use eframe::egui;
 
@@ -27,7 +32,9 @@ fn main() -> eframe::Result {
             .with_title("haunt")
             .with_app_id("haunt")
             .with_inner_size([1180.0, 740.0])
-            .with_min_inner_size([620.0, 380.0]),
+            .with_min_inner_size([620.0, 380.0])
+            .with_transparent(true)
+            .with_decorations(false),
         ..Default::default()
     };
 

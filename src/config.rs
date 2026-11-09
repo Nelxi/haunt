@@ -82,26 +82,44 @@ pub struct Settings {
     pub bold_is_bright: bool,
     pub keepalive_secs: u64,
     pub sidebar_width: f32,
+    /// Opacity of the terminal and panel backgrounds (lets the blur/aurora through).
+    pub opacity: f32,
+    /// Windows acrylic blur behind the window.
+    pub blur: bool,
+    /// Animated GLSL aurora behind the panels.
+    pub animated_background: bool,
+    /// Rotate the gradient on the focused pane border (Hyprland `borderangle`).
+    pub border_animation: bool,
+    /// Smooth cursor movement with a trail, like kitty's `cursor_trail`.
+    pub cursor_trail: bool,
+    /// Master switch for UI animations.
+    pub animations: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "Catppuccin Mocha".into(),
-            font_size: 14.0,
+            font_size: 13.5,
             line_height: 1.2,
             scrollback: 10_000,
             cursor: CursorStyle::Block,
             cursor_blink: true,
-            padding: 10.0,
-            gaps: 8.0,
-            rounding: 10.0,
+            padding: 18.0,
+            gaps: 10.0,
+            rounding: 12.0,
             border_width: 2.0,
             copy_on_select: false,
             right_click_paste: true,
             bold_is_bright: true,
             keepalive_secs: 30,
-            sidebar_width: 240.0,
+            sidebar_width: 250.0,
+            opacity: 0.86,
+            blur: true,
+            animated_background: true,
+            border_animation: true,
+            cursor_trail: true,
+            animations: true,
         }
     }
 }

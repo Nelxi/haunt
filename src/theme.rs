@@ -44,6 +44,29 @@ pub fn all() -> &'static [Theme] {
     static THEMES: OnceLock<Vec<Theme>> = OnceLock::new();
     THEMES.get_or_init(|| {
         vec![
+            // The Ghostly night: violet ink, moonlit text, the same accent as ghostlyvpn.com.
+            Theme {
+                name: "Ghostly Night",
+                ansi: ansi![
+                    0x1f1b2c, 0xff9aa9, 0x8fe3c0, 0xffd08a, 0x8fb4ff, 0xc8a6ff, 0x8fe0e8, 0xcfc8e6,
+                    0x4a4360, 0xffb3bf, 0xa9f0d2, 0xffe0a8, 0xadc8ff, 0xdcc2ff, 0xa9ecf2, 0xf6f3ff,
+                ],
+                fg: hex(0xe9e4fa),
+                bg: hex(0x0b0912),
+                cursor: hex(0xc8b4ff),
+                selection: hex(0x3a2f5c),
+                crust: hex(0x05040a),
+                mantle: hex(0x0e0b16),
+                surface: hex(0x1a1724),
+                overlay: hex(0x2b2639),
+                text: hex(0xf6f3ff),
+                subtext: hex(0xa59dc5),
+                accent: hex(0xa88dff),
+                accent2: hex(0x7c5cf0),
+                ok: hex(0x8fe3c0),
+                warn: hex(0xffd08a),
+                err: hex(0xff9aa9),
+            },
             Theme {
                 name: "Catppuccin Mocha",
                 ansi: ansi![
@@ -204,11 +227,10 @@ pub fn all() -> &'static [Theme] {
 
 pub fn by_name(name: &str) -> &'static Theme {
     let all = all();
-    if name == "Graphite" {
-        if let Some(t) = all.iter().find(|t| t.name == "Graphite Mono") {
+    if name == "Graphite"
+        && let Some(t) = all.iter().find(|t| t.name == "Graphite Mono") {
             return t;
         }
-    }
     all.iter().find(|t| t.name == name).unwrap_or(&all[0])
 }
 
@@ -245,6 +267,7 @@ mod tests {
         let themes = all();
         assert!(themes.len() >= 6);
         let names: Vec<&str> = themes.iter().map(|t| t.name).collect();
+        assert!(names.contains(&"Ghostly Night"));
         assert!(names.contains(&"Catppuccin Mocha"));
         assert!(names.contains(&"Graphite Mono"));
         assert!(names.contains(&"Tokyo Night"));
@@ -273,7 +296,7 @@ mod tests {
         assert_eq!(by_name("Catppuccin Mocha").name, "Catppuccin Mocha");
         assert_eq!(by_name("Graphite Mono").name, "Graphite Mono");
         assert_eq!(by_name("Graphite").name, "Graphite Mono"); // alias
-        assert_eq!(by_name("NonExistentTheme").name, "Catppuccin Mocha"); // fallback to default
+        assert_eq!(by_name("NonExistentTheme").name, "Ghostly Night"); // fallback to default
     }
 
     #[test]

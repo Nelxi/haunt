@@ -117,18 +117,16 @@ pub fn show(ui: &mut egui::Ui, s: &mut Session, look: &Look<'_>, input_enabled: 
         });
     }
 
-    // Pane: floating rounded card with a glow and an animated gradient border
-    // when focused (Hyprland active border), hairline when not.
+    // Pane: a Ghostly plate. Its top edge catches the accent light when focused; the optional
+    // rotating gradient border (Hyprland `borderangle`) replaces that edge when enabled.
     let painter = ui.painter_at(rect.expand(24.0));
     let radius = set.rounding.clamp(0.0, 30.0);
     let focus_t = anim::toggle(ui.ctx(), resp.id.with("focus"), focused, 0.25);
-    if focus_t > 0.0 {
-        fx::glow(&painter, rect, radius, theme.accent.gamma_multiply(0.18 * focus_t), 22.0, 0.0);
-    }
+    fx::shadow(&painter, rect, radius, 0.7);
     painter.rect_filled(rect, CornerRadius::same(radius as u8), theme.bg.gamma_multiply(look.pane_alpha));
     let animate_border = set.border_animation && set.animations && look.window_focused && focused;
-    let angle = if animate_border { look.time * TAU / 3.0 } else { PI / 4.0 };
-    if focus_t > 0.01 {
+    if set.border_animation && focus_t > 0.01 {
+        let angle = if animate_border { look.time * TAU / 3.0 } else { PI / 4.0 };
         fx::gradient_border(
             &painter,
             rect,
@@ -138,14 +136,10 @@ pub fn show(ui: &mut egui::Ui, s: &mut Session, look: &Look<'_>, input_enabled: 
             theme.accent2.gamma_multiply(focus_t),
             angle,
         );
-    }
-    if focus_t < 0.99 {
-        painter.rect_stroke(
-            rect,
-            CornerRadius::same(radius as u8),
-            Stroke::new(1.0, theme.overlay.gamma_multiply(1.0 - focus_t)),
-            StrokeKind::Inside,
-        );
+    } else {
+        let top = fx::mix_alpha(Color32::from_white_alpha(16), theme.accent.gamma_multiply(0.75), focus_t);
+        let bottom = fx::mix_alpha(Color32::from_white_alpha(9), theme.accent.gamma_multiply(0.12), focus_t);
+        fx::vgradient_stroke(&painter, rect, radius, 1.0, top, bottom);
     }
     if animate_border {
         ui.ctx().request_repaint_after(Duration::from_millis(33));
@@ -238,12 +232,11 @@ fn handle_keyboard(ui: &mut egui::Ui, s: &mut Session, set: &Settings) {
                         Key::End => Some(Scroll::Bottom),
                         _ => None,
                     };
-                    if let Some(sc) = scroll {
-                        if !mode.contains(TermMode::ALT_SCREEN) {
+                    if let Some(sc) = scroll
+                        && !mode.contains(TermMode::ALT_SCREEN) {
                             s.term.lock().scroll_display(sc);
                             continue;
                         }
-                    }
                 }
                 if let Some(bytes) = key_bytes(*key, *modifiers, mode) {
                     out.extend_from_slice(&bytes);
@@ -462,9 +455,9 @@ fn handle_mouse(ui: &mut egui::Ui, s: &mut Session, resp: &egui::Response, m: &M
         }
         let wants_motion = mode.contains(TermMode::MOUSE_MOTION)
             || (mode.contains(TermMode::MOUSE_DRAG) && s.view.reported_button.is_some());
-        if wants_motion {
-            if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
-                if resp.rect.contains(pos) {
+        if wants_motion
+            && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+                && resp.rect.contains(pos) {
                     let (col, row, _) = m.cell_at(pos);
                     if s.view.last_report_cell != Some((col, row)) {
                         s.view.last_report_cell = Some((col, row));
@@ -472,8 +465,6 @@ fn handle_mouse(ui: &mut egui::Ui, s: &mut Session, resp: &egui::Response, m: &M
                         s.send(mouse_report(code, col, row, true, mode, mods));
                     }
                 }
-            }
-        }
         return;
     }
 

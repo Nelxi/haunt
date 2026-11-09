@@ -38,16 +38,17 @@ like a riced Hyprland desktop.
 - host key verification with SHA-256 fingerprints and a loud warning when a key changes
 - secrets live in **Windows Credential Manager**, never in the config file
 - keepalive, reconnect in place (same tab, same scrollback)
+- **proxies like PuTTY**: SOCKS5 and HTTP CONNECT (with auth, DNS resolved by the proxy) or a **jump host** through another saved server (ProxyJump), chains of any depth
 
 **Looks**
-- frameless window with acrylic blur and a GLSL aurora background
-- floating glass panes with gaps, rotating gradient border on the active pane
+- frameless window with acrylic blur and a GLSL night sky: fog, stars, slow snow
+- floating plates on a 4 px grid, top edges that catch the accent light; SF Pro Display for the UI when it is installed, bundled Onest otherwise
 - HyDE/Hyprland animation curves for tabs, dialogs, toasts and pane switches
-- themes: Catppuccin Mocha, Graphite Mono, Tokyo Night, Rosé Pine, Gruvbox Dark, Nord
+- themes: Ghostly Night (default), Catppuccin Mocha, Graphite Mono, Tokyo Night, Rosé Pine, Gruvbox Dark, Nord
 - every effect can be switched off for a calm, minimal UI
 
 **Workflow**
-- saved servers with groups and search
+- saved servers with groups and search; a start screen with quick connect and recent servers
 - launcher (`Ctrl K`) with fuzzy search and quick connect to `user@host:port`
 - tabs, duplicate tab, jump to tab with `Ctrl 1…9`
 
@@ -91,11 +92,14 @@ haunt keeps its own `known_hosts` next to the config and also trusts `~/.ssh/kno
 
 - [x] terminal, SSH sessions, saved servers, themes
 - [x] glass UI, animations, launcher
-- [x] import from PuTTY and `~/.ssh/config` (Termius keeps its hosts encrypted, so no import)
+- [x] import from PuTTY and `~/.ssh/config`, including their proxies and jump hosts (Termius keeps its hosts encrypted, so no import)
+- [x] SOCKS5 / HTTP proxy and jump hosts
 - [ ] SSH agent / Pageant, keyboard-interactive (2FA)
-- [ ] streamer mode: IPs and secrets hidden from screen capture, visible to you
+- [x] streamer mode: IPs and secrets hidden from screen capture, visible to you
 - [ ] SFTP, port forwarding, split panes, snippets
+- [ ] MCP server so AI agents (Claude Code, Codex) can run commands on your servers with per-server permissions
+- [ ] macOS and Linux, Android
 
 ## License
 
-[MIT](LICENSE). The bundled CaskaydiaCove Nerd Font is under the [SIL OFL](assets/fonts/LICENSE).
+[MIT](LICENSE). The bundled CaskaydiaCove Nerd Font and Onest are under the SIL OFL ([CaskaydiaCove](assets/fonts/LICENSE), [Onest](assets/fonts/OFL-Onest.txt)).

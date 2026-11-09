@@ -10,6 +10,10 @@ use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId};
 static MONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/CaskaydiaCoveNerdFontMono-Regular.ttf");
 static MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/CaskaydiaCoveNerdFontMono-Bold.ttf");
 static MONO_ITALIC: &[u8] = include_bytes!("../assets/fonts/CaskaydiaCoveNerdFontMono-Italic.ttf");
+static UI_REGULAR: &[u8] = include_bytes!("../assets/fonts/Onest-regular.ttf");
+static UI_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Onest-medium.ttf");
+static UI_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Onest-semibold.ttf");
+static UI_BOLD: &[u8] = include_bytes!("../assets/fonts/Onest-bold.ttf");
 
 /// Icon codepoints (Nerd Fonts).
 #[allow(dead_code)]
@@ -38,6 +42,8 @@ pub mod icon {
     pub const GHOST: &str = "\u{f02a0}";
     pub const SERVER: &str = "\u{f233}";
     pub const FOLDER: &str = "\u{f07b}";
+    pub const ROUTE: &str = "\u{f0e8}";
+    pub const GLOBE: &str = "\u{f0ac}";
 }
 
 fn fonts_dir() -> PathBuf {
@@ -45,9 +51,17 @@ fn fonts_dir() -> PathBuf {
     windir.join("Fonts")
 }
 
+/// Per-user installs land in %LOCALAPPDATA%\Microsoft\Windows\Fonts, machine-wide in %WINDIR%\Fonts.
+fn font_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![fonts_dir()];
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local).join(r"Microsoft\Windows\Fonts"));
+    }
+    dirs
+}
+
 fn read_system(names: &[&str]) -> Option<Vec<u8>> {
-    let dir = fonts_dir();
-    names.iter().find_map(|n| std::fs::read(dir.join(n)).ok())
+    font_dirs().iter().find_map(|dir| names.iter().find_map(|n| std::fs::read(dir.join(n)).ok()))
 }
 
 pub fn install(ctx: &egui::Context) {
@@ -62,20 +76,30 @@ pub fn install(ctx: &egui::Context) {
     add("mono-bold", FontData::from_static(MONO_BOLD));
     add("mono-italic", FontData::from_static(MONO_ITALIC));
 
-    let has_ui = if let Some(d) = read_system(&["segoeui.ttf"]) {
-        add("ui", FontData::from_owned(d));
-        true
-    } else {
-        false
-    };
-    let has_semibold = if let Some(d) = read_system(&["seguisb.ttf", "segoeuib.ttf"]) {
-        add("ui-semibold", FontData::from_owned(d));
-        true
-    } else {
-        false
-    };
-    let has_display = if let Some(d) = read_system(&["segoeuib.ttf"]) {
-        add("ui-display", FontData::from_owned(d));
+    // Onest (the Ghostly brand face, OFL) for the interface; Segoe UI only as a glyph fallback.
+    add("ui", FontData::from_static(UI_REGULAR));
+    add("ui-medium", FontData::from_static(UI_MEDIUM));
+    add("ui-semibold", FontData::from_static(UI_SEMIBOLD));
+    add("ui-display", FontData::from_static(UI_BOLD));
+    // SF Pro Display can't be shipped (Apple licence), but when it is installed it wins over Onest.
+    let sf: Vec<(&str, bool)> = [
+        ("sf", &["SF-Pro-Display-Regular.otf", "SFProDisplay-Regular.otf", "SF-Pro-Display-Regular.ttf"][..]),
+        ("sf-medium", &["SF-Pro-Display-Medium.otf", "SFProDisplay-Medium.otf", "SF-Pro-Display-Medium.ttf"][..]),
+        ("sf-semibold", &["SF-Pro-Display-Semibold.otf", "SFProDisplay-Semibold.otf", "SF-Pro-Display-Semibold.ttf"][..]),
+        ("sf-display", &["SF-Pro-Display-Bold.otf", "SFProDisplay-Bold.otf", "SF-Pro-Display-Bold.ttf"][..]),
+    ]
+    .into_iter()
+    .map(|(name, files)| match read_system(files) {
+        Some(d) => {
+            add(name, FontData::from_owned(d));
+            (name, true)
+        }
+        None => (name, false),
+    })
+    .collect();
+    let has_sf = |name: &str| sf.iter().any(|(n, ok)| *n == name && *ok);
+    let has_segoe = if let Some(d) = read_system(&["segoeui.ttf"]) {
+        add("segoe", FontData::from_owned(d));
         true
     } else {
         false
@@ -100,18 +124,32 @@ pub fn install(ctx: &egui::Context) {
     defs.families.insert(FontFamily::Name("mono-bold".into()), chain(&["mono-bold", "mono"], &egui_mono));
     defs.families.insert(FontFamily::Name("mono-italic".into()), chain(&["mono-italic", "mono"], &egui_mono));
 
-    let ui: Vec<&str> = if has_ui { vec!["ui", "mono"] } else { vec!["mono"] };
-    defs.families.insert(FontFamily::Proportional, chain(&ui, &egui_prop));
-    let semi: Vec<&str> = if has_semibold { vec!["ui-semibold", "mono"] } else { ui.clone() };
-    defs.families.insert(FontFamily::Name("bold".into()), chain(&semi, &egui_prop));
-    let display: Vec<&str> = if has_display { vec!["ui-display", "mono"] } else { semi.clone() };
-    defs.families.insert(FontFamily::Name("display".into()), chain(&display, &egui_prop));
+    let face = |sf: &'static str, onest: &'static str| -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if has_sf(sf) {
+            v.push(sf);
+        }
+        v.push(onest);
+        if has_segoe {
+            v.push("segoe");
+        }
+        v.push("mono");
+        v
+    };
+    defs.families.insert(FontFamily::Proportional, chain(&face("sf", "ui"), &egui_prop));
+    defs.families.insert(FontFamily::Name("medium".into()), chain(&face("sf-medium", "ui-medium"), &egui_prop));
+    defs.families.insert(FontFamily::Name("bold".into()), chain(&face("sf-semibold", "ui-semibold"), &egui_prop));
+    defs.families.insert(FontFamily::Name("display".into()), chain(&face("sf-display", "ui-display"), &egui_prop));
 
     ctx.set_fonts(defs);
 }
 
 pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("bold".into()))
+}
+
+pub fn medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("medium".into()))
 }
 
 pub fn display(size: f32) -> FontId {

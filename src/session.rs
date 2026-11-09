@@ -8,7 +8,9 @@
 //! title change go through the listener). The UI must therefore never lock `term` while
 //! holding `shared`.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,10 +23,12 @@ use eframe::egui;
 use parking_lot::Mutex;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key};
 use russh::{ChannelMsg, Disconnect, client};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::config::{self, Auth, Server};
+use crate::config::{self, Auth, Proxy, Server};
 use crate::secrets;
 
 /// Grid size handed to alacritty_terminal.
@@ -115,10 +119,44 @@ pub struct ConnectSpec {
     pub user: String,
     pub auth: Auth,
     pub keepalive: Duration,
+    /// What sits between us and the host (resolved from the server's [`Proxy`]).
+    pub via: Option<Box<Via>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Via {
+    Socks5 { host: String, port: u16, user: String },
+    Http { host: String, port: u16, user: String },
+    /// SSH into this server first, then open a direct-tcpip channel to the host.
+    Jump(ConnectSpec),
+    /// The proxy cannot be used (deleted jump server, loop); the message says why.
+    Broken(String),
 }
 
 impl ConnectSpec {
-    pub fn from_server(s: &Server, keepalive_secs: u64) -> Self {
+    /// `all` is the saved server list, needed to resolve jump hosts (which may chain).
+    pub fn from_server(s: &Server, all: &[Server], keepalive_secs: u64) -> Self {
+        Self::resolve(s, all, keepalive_secs, &mut Vec::new())
+    }
+
+    fn resolve(s: &Server, all: &[Server], keepalive_secs: u64, seen: &mut Vec<Uuid>) -> Self {
+        seen.push(s.id);
+        let via = match &s.proxy {
+            Proxy::None => None,
+            Proxy::Socks5 { host, port, user } => {
+                Some(Via::Socks5 { host: host.trim().into(), port: *port, user: user.trim().into() })
+            }
+            Proxy::Http { host, port, user } => {
+                Some(Via::Http { host: host.trim().into(), port: *port, user: user.trim().into() })
+            }
+            Proxy::Jump { server } => Some(if seen.contains(server) {
+                Via::Broken(format!("jump host loop at {}", s.display_name()))
+            } else if let Some(j) = all.iter().find(|x| x.id == *server) {
+                Via::Jump(Self::resolve(j, all, keepalive_secs, seen))
+            } else {
+                Via::Broken(format!("the jump server of {} was deleted", s.display_name()))
+            }),
+        };
         Self {
             server_id: Some(s.id),
             host: s.host.trim().to_string(),
@@ -126,6 +164,18 @@ impl ConnectSpec {
             user: s.user.trim().to_string(),
             auth: s.auth.clone(),
             keepalive: Duration::from_secs(keepalive_secs.max(5)),
+            via: via.map(Box::new),
+        }
+    }
+
+    /// `user@host:port`, preceded by the route when there is one.
+    pub fn route(&self) -> String {
+        let me = format!("{}@{}:{}", self.user, self.host, self.port);
+        match self.via.as_deref() {
+            None | Some(Via::Broken(_)) => me,
+            Some(Via::Socks5 { host, port, .. }) => format!("socks5 {host}:{port} → {me}"),
+            Some(Via::Http { host, port, .. }) => format!("http {host}:{port} → {me}"),
+            Some(Via::Jump(j)) => format!("{} → {me}", j.route()),
         }
     }
 }
@@ -283,8 +333,7 @@ struct Task {
 
 impl Task {
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Input>) {
-        let target = format!("{}@{}:{}", self.spec.user, self.spec.host, self.spec.port);
-        self.out.info(&format!("connecting to {target} …"));
+        self.out.info(&format!("connecting to {} …", self.spec.route()));
         let reason = match self.session(&mut rx).await {
             Ok(reason) => {
                 self.out.info(&format!("\r\n{reason}"));
@@ -309,33 +358,9 @@ impl Task {
             bail!("no host set");
         }
 
-        let stream = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::net::TcpStream::connect((spec.host.as_str(), spec.port)),
-        )
-        .await
-        .map_err(|_| anyhow!("connection timed out after 10 s"))?
-        .with_context(|| format!("cannot reach {}:{}", spec.host, spec.port))?;
-        stream.set_nodelay(true)?;
-
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(spec.keepalive),
-            keepalive_max: 3,
-            inactivity_timeout: None,
-            nodelay: true,
-            ..Default::default()
-        });
-        let handler = HostKeyCheck {
-            host: spec.host.clone(),
-            port: spec.port,
-            shared: self.shared.clone(),
-            ctx: self.ctx.clone(),
-        };
-        let mut handle = client::connect_stream(config, stream, handler)
-            .await
-            .context("SSH handshake failed")?;
-
-        self.authenticate(&mut handle).await?;
+        // Jump hosts stay alive as long as the session: its traffic runs through them.
+        let mut hops = Vec::new();
+        let handle = self.open(&spec, &mut hops).await?;
 
         let channel = handle.channel_open_session().await.context("cannot open a session channel")?;
         let size = self.shared.lock().size;
@@ -362,6 +387,7 @@ impl Task {
                     Some(Input::Close) | None => {
                         let _ = channel.eof().await;
                         let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+                        close_hops(hops).await;
                         return Ok("session closed".into());
                     }
                 },
@@ -375,17 +401,108 @@ impl Task {
             }
         }
         let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        close_hops(hops).await;
         Ok(match exit_status {
             Some(0) | None => "connection closed".into(),
             Some(code) => format!("connection closed (exit status {code})"),
         })
     }
 
-    async fn authenticate(&mut self, handle: &mut client::Handle<HostKeyCheck>) -> Result<()> {
-        let spec = self.spec.clone();
+    /// Reaches `spec`'s host (through its proxy chain), does the handshake and logs in.
+    /// Handles of the jump hosts on the way are pushed to `hops`.
+    fn open<'a>(
+        &'a mut self,
+        spec: &'a ConnectSpec,
+        hops: &'a mut Vec<client::Handle<HostKeyCheck>>,
+    ) -> Pin<Box<dyn Future<Output = Result<client::Handle<HostKeyCheck>>> + Send + 'a>> {
+        Box::pin(async move {
+            if spec.host.is_empty() {
+                bail!("no host set");
+            }
+            let stream: Box<dyn Io> = match spec.via.as_deref() {
+                None => Box::new(tcp(&spec.host, spec.port).await?),
+                Some(Via::Broken(why)) => bail!("{why}"),
+                Some(Via::Socks5 { host, port, user }) => {
+                    self.out.info(&format!("via socks5 {host}:{port}"));
+                    let pass = self.proxy_password(spec, user, host, *port).await?;
+                    let mut s = tcp(host, *port).await?;
+                    socks5(&mut s, &spec.host, spec.port, user, pass.as_ref().map(|p| p.0.as_str()))
+                        .await
+                        .with_context(|| format!("SOCKS5 proxy {host}:{port}"))?;
+                    self.remember_proxy(spec, pass);
+                    Box::new(s)
+                }
+                Some(Via::Http { host, port, user }) => {
+                    self.out.info(&format!("via http proxy {host}:{port}"));
+                    let pass = self.proxy_password(spec, user, host, *port).await?;
+                    let mut s = tcp(host, *port).await?;
+                    http_connect(&mut s, &spec.host, spec.port, user, pass.as_ref().map(|p| p.0.as_str()))
+                        .await
+                        .with_context(|| format!("HTTP proxy {host}:{port}"))?;
+                    self.remember_proxy(spec, pass);
+                    Box::new(s)
+                }
+                Some(Via::Jump(j)) => {
+                    let jh = self.open(j, hops).await?;
+                    self.out.info(&format!("jump {} → {}:{}", j.host, spec.host, spec.port));
+                    let ch = jh
+                        .channel_open_direct_tcpip(spec.host.clone(), spec.port as u32, "127.0.0.1", 0)
+                        .await
+                        .with_context(|| format!("{} refused to forward to {}:{}", j.host, spec.host, spec.port))?;
+                    hops.push(jh);
+                    Box::new(ch.into_stream())
+                }
+            };
+
+            let config = Arc::new(client::Config {
+                keepalive_interval: Some(spec.keepalive),
+                keepalive_max: 3,
+                inactivity_timeout: None,
+                nodelay: true,
+                ..Default::default()
+            });
+            let handler = HostKeyCheck {
+                host: spec.host.clone(),
+                port: spec.port,
+                shared: self.shared.clone(),
+                ctx: self.ctx.clone(),
+            };
+            let mut handle = client::connect_stream(config, stream, handler)
+                .await
+                .with_context(|| format!("SSH handshake with {} failed", spec.host))?;
+            self.authenticate(&mut handle, spec).await?;
+            Ok(handle)
+        })
+    }
+
+    /// The proxy password: none without a user, else the saved one, else asked for.
+    async fn proxy_password(&self, spec: &ConnectSpec, user: &str, host: &str, port: u16) -> Result<Option<(String, bool)>> {
+        if user.is_empty() {
+            return Ok(None);
+        }
+        if let Some(p) = spec.server_id.and_then(secrets::get_proxy) {
+            return Ok(Some((p, false)));
+        }
+        let msg = format!("Proxy password for {user}@{host}:{port}");
+        let r = self
+            .ask(PromptKind::Password, "Proxy password", &msg)
+            .await
+            .ok_or_else(|| anyhow!("authentication cancelled"))?;
+        Ok(Some(r))
+    }
+
+    fn remember_proxy(&mut self, spec: &ConnectSpec, pass: Option<(String, bool)>) {
+        if let (Some((p, true)), Some(id)) = (pass, spec.server_id)
+            && let Err(e) = secrets::set_proxy(id, &p) {
+                self.out.error(&format!("could not save the proxy password: {e}"));
+            }
+    }
+
+    async fn authenticate(&mut self, handle: &mut client::Handle<HostKeyCheck>, spec: &ConnectSpec) -> Result<()> {
+        let spec = spec.clone();
         match &spec.auth {
             Auth::Key { path } => {
-                let key = self.load_key(path).await?;
+                let key = self.load_key(path, spec.server_id).await?;
                 let hash = handle.best_supported_rsa_hash().await?.flatten();
                 let res = handle
                     .authenticate_publickey(&spec.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
@@ -414,13 +531,11 @@ impl Task {
                     };
                     let res = handle.authenticate_password(&spec.user, &password).await?;
                     if res.success() {
-                        if remember {
-                            if let Some(id) = spec.server_id {
-                                if let Err(e) = secrets::set(id, &password) {
+                        if remember
+                            && let Some(id) = spec.server_id
+                                && let Err(e) = secrets::set(id, &password) {
                                     self.out.error(&format!("could not save the password: {e}"));
                                 }
-                            }
-                        }
                         return Ok(());
                     }
                     if from_store {
@@ -433,7 +548,7 @@ impl Task {
     }
 
     /// Loads a private key, asking for the passphrase if the key needs one.
-    async fn load_key(&mut self, path: &PathBuf) -> Result<ssh_key::PrivateKey> {
+    async fn load_key(&mut self, path: &PathBuf, server_id: Option<Uuid>) -> Result<ssh_key::PrivateKey> {
         let text = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("cannot read key file {}", path.display()))?;
@@ -442,7 +557,7 @@ impl Task {
             Err(e) => e,
         };
         // Encrypted key (or unreadable). Try the saved passphrase, then ask.
-        let mut saved = self.spec.server_id.and_then(secrets::get);
+        let mut saved = server_id.and_then(secrets::get);
         for attempt in 0..3 {
             let (pass, remember) = match saved.take() {
                 Some(p) => (p, false),
@@ -459,11 +574,10 @@ impl Task {
                 }
             };
             if let Ok(k) = russh::keys::decode_secret_key(&text, Some(&pass)) {
-                if remember {
-                    if let Some(id) = self.spec.server_id {
+                if remember
+                    && let Some(id) = server_id {
                         let _ = secrets::set(id, &pass);
                     }
-                }
                 return Ok(k);
             }
         }
@@ -473,6 +587,151 @@ impl Task {
     async fn ask(&self, kind: PromptKind, title: &str, message: &str) -> Option<(String, bool)> {
         ask(&self.shared, &self.ctx, kind, title, message).await
     }
+}
+
+trait Io: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Io for T {}
+
+async fn close_hops(hops: Vec<client::Handle<HostKeyCheck>>) {
+    for h in hops.into_iter().rev() {
+        let _ = h.disconnect(Disconnect::ByApplication, "", "en").await;
+    }
+}
+
+async fn tcp(host: &str, port: u16) -> Result<TcpStream> {
+    let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((host, port)))
+        .await
+        .map_err(|_| anyhow!("connection to {host}:{port} timed out after 10 s"))?
+        .with_context(|| format!("cannot reach {host}:{port}"))?;
+    stream.set_nodelay(true)?;
+    Ok(stream)
+}
+
+/// SOCKS5 CONNECT (RFC 1928), with username/password auth (RFC 1929) when a user is set.
+/// The host name goes to the proxy as is, so the proxy resolves it (no local DNS leak).
+async fn socks5<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: Option<&str>,
+) -> Result<()> {
+    let with_auth = !user.is_empty();
+    s.write_all(if with_auth { &[5, 2, 0, 2][..] } else { &[5, 1, 0][..] }).await?;
+    let mut r = [0u8; 2];
+    s.read_exact(&mut r).await.context("no reply")?;
+    if r[0] != 5 {
+        bail!("not a SOCKS5 proxy");
+    }
+    match r[1] {
+        0 => {}
+        2 if with_auth => {
+            let pass = pass.unwrap_or("");
+            if user.len() > 255 || pass.len() > 255 {
+                bail!("user or password longer than 255 bytes");
+            }
+            let mut m = vec![1, user.len() as u8];
+            m.extend_from_slice(user.as_bytes());
+            m.push(pass.len() as u8);
+            m.extend_from_slice(pass.as_bytes());
+            s.write_all(&m).await?;
+            s.read_exact(&mut r).await?;
+            if r[1] != 0 {
+                bail!("wrong proxy user or password");
+            }
+        }
+        0xff if !with_auth => bail!("the proxy wants a user and password"),
+        _ => bail!("the proxy accepts none of our auth methods"),
+    }
+    if host.len() > 255 {
+        bail!("host name too long");
+    }
+    let mut m = vec![5, 1, 0, 3, host.len() as u8];
+    m.extend_from_slice(host.as_bytes());
+    m.extend_from_slice(&port.to_be_bytes());
+    s.write_all(&m).await?;
+    let mut head = [0u8; 4];
+    s.read_exact(&mut head).await?;
+    if head[1] != 0 {
+        bail!(
+            "{}",
+            match head[1] {
+                1 => "general failure",
+                2 => "connection not allowed by ruleset",
+                3 => "network unreachable",
+                4 => "host unreachable",
+                5 => "connection refused",
+                6 => "TTL expired",
+                7 => "command not supported",
+                8 => "address type not supported",
+                _ => "unknown error",
+            }
+        );
+    }
+    let skip = match head[3] {
+        1 => 4 + 2,
+        4 => 16 + 2,
+        3 => {
+            let mut l = [0u8; 1];
+            s.read_exact(&mut l).await?;
+            l[0] as usize + 2
+        }
+        _ => bail!("bad reply"),
+    };
+    let mut rest = vec![0u8; skip];
+    s.read_exact(&mut rest).await?;
+    Ok(())
+}
+
+/// HTTP CONNECT tunnel, Basic auth when a user is set.
+async fn http_connect<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: Option<&str>,
+) -> Result<()> {
+    let target = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+    let mut req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: haunt\r\n");
+    if !user.is_empty() {
+        let cred = base64(format!("{user}:{}", pass.unwrap_or("")).as_bytes());
+        req.push_str(&format!("Proxy-Authorization: Basic {cred}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).await?;
+    // Byte by byte: the SSH banner may follow the headers at once and must stay in the stream.
+    let mut head = Vec::new();
+    let mut b = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() > 16 * 1024 {
+            bail!("reply headers too long");
+        }
+        s.read_exact(&mut b).await.context("the proxy closed the connection")?;
+        head.push(b[0]);
+    }
+    let head = String::from_utf8_lossy(&head);
+    let status = head.lines().next().unwrap_or("").trim();
+    match status.split_whitespace().nth(1).unwrap_or("") {
+        "200" => Ok(()),
+        "407" => bail!("proxy authentication required ({status})"),
+        _ => bail!("{status}"),
+    }
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 async fn ask(
@@ -543,14 +802,102 @@ impl client::Handler for HostKeyCheck {
         );
         match ask(&self.shared, &self.ctx, PromptKind::HostKey, "Unknown host", &message).await {
             Some(_) => {
-                if let Some(path) = &ours {
-                    if let Err(e) = russh::keys::known_hosts::learn_known_hosts_path(&self.host, self.port, key, path) {
+                if let Some(path) = &ours
+                    && let Err(e) = russh::keys::known_hosts::learn_known_hosts_path(&self.host, self.port, key, path) {
                         log::warn!("could not save host key: {e}");
                     }
-                }
                 Ok(true)
             }
             None => bail!("host key not trusted, connection aborted"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_rfc4648() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"user:pass"), "dXNlcjpwYXNz");
+    }
+
+    fn srv(name: &str) -> Server {
+        let mut s = Server::new();
+        s.name = name.into();
+        s.host = format!("{name}.example");
+        s
+    }
+
+    #[test]
+    fn jump_chain_and_loop() {
+        let mut a = srv("a");
+        let mut b = srv("b");
+        let c = srv("c");
+        a.proxy = Proxy::Jump { server: b.id };
+        b.proxy = Proxy::Jump { server: c.id };
+        let all = vec![a.clone(), b.clone(), c.clone()];
+        let spec = ConnectSpec::from_server(&a, &all, 30);
+        assert_eq!(spec.route(), "root@c.example:22 → root@b.example:22 → root@a.example:22");
+
+        b.proxy = Proxy::Jump { server: a.id };
+        let all = vec![a.clone(), b.clone()];
+        let spec = ConnectSpec::from_server(&a, &all, 30);
+        let Some(Via::Jump(j)) = spec.via.as_deref() else { panic!("no jump") };
+        assert!(matches!(j.via.as_deref(), Some(Via::Broken(_))));
+    }
+
+    #[tokio::test]
+    async fn socks5_handshake_with_auth() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let fake = tokio::spawn(async move {
+            let mut b = [0u8; 4];
+            server.read_exact(&mut b).await.unwrap();
+            assert_eq!(b, [5, 2, 0, 2]);
+            server.write_all(&[5, 2]).await.unwrap();
+            let mut a = [0u8; 5];
+            server.read_exact(&mut a).await.unwrap();
+            assert_eq!(a, [1, 1, b'u', 1, b'p']);
+            server.write_all(&[1, 0]).await.unwrap();
+            let mut c = [0u8; 5 + 6 + 2];
+            server.read_exact(&mut c).await.unwrap();
+            assert_eq!(&c[5..11], b"host.x");
+            assert_eq!(&c[11..], &22u16.to_be_bytes());
+            server.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        });
+        socks5(&mut client, "host.x", 22, "u", Some("p")).await.unwrap();
+        fake.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_connect_keeps_banner() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 512];
+            let n = server.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert!(req.starts_with("CONNECT h:22 HTTP/1.1\r\n"));
+            server.write_all(b"HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-x\r\n").await.unwrap();
+        });
+        http_connect(&mut client, "h", 22, "", None).await.unwrap();
+        let mut banner = [0u8; 9];
+        client.read_exact(&mut banner).await.unwrap();
+        assert_eq!(&banner, b"SSH-2.0-x");
+    }
+
+    #[tokio::test]
+    async fn http_connect_reports_407() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 512];
+            let _ = server.read(&mut buf).await.unwrap();
+            server.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await.unwrap();
+        });
+        let e = http_connect(&mut client, "h", 22, "", None).await.unwrap_err();
+        assert!(e.to_string().contains("407"));
     }
 }

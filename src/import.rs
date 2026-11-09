@@ -5,14 +5,18 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Auth, Server};
+use uuid::Uuid;
 
-/// Sessions found in one source. `jump` counts entries that go through a jump host / proxy;
-/// they are imported as direct connections.
+use crate::config::{Auth, Proxy, Server};
+
+/// Sessions found in one source. `jumps` links a server to the hosts it jumps through (first hop
+/// first), resolved against the saved list by [`link_jumps`]. `unsupported` counts proxies haunt
+/// cannot use (SOCKS4, telnet, local command, ProxyCommand); those are imported as direct.
 #[derive(Default)]
 pub struct Found {
     pub servers: Vec<Server>,
-    pub jump: usize,
+    pub jumps: Vec<(Uuid, Vec<String>)>,
+    pub unsupported: usize,
 }
 
 /// Saved PuTTY sessions from `HKCU\Software\SimonTatham\PuTTY\Sessions`.
@@ -46,12 +50,29 @@ pub fn putty() -> Found {
         }
         let port = key.get_value::<u32, _>("PortNumber").ok().and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0);
         let key_file = get("PublicKeyFile");
-        let proxy: u32 = key.get_value("ProxyMethod").unwrap_or(0);
-        if proxy != 0 {
-            found.jump += 1;
-        }
+        let method: u32 = key.get_value("ProxyMethod").unwrap_or(0);
+        let p_host = get("ProxyHost").trim().to_string();
+        let p_port = key.get_value::<u32, _>("ProxyPort").ok().and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0);
+        let p_user = get("ProxyUsername").trim().to_string();
 
         let mut s = Server::new();
+        match method {
+            0 => {}
+            2 if !p_host.is_empty() => s.proxy = Proxy::Socks5 { host: p_host, port: p_port.unwrap_or(1080), user: p_user },
+            3 if !p_host.is_empty() => s.proxy = Proxy::Http { host: p_host, port: p_port.unwrap_or(3128), user: p_user },
+            // SSH proxy (PuTTY 0.77+): the host field may be a saved session name or user@host.
+            6 if !p_host.is_empty() => {
+                let mut hop = p_host;
+                if !p_user.is_empty() && !hop.contains('@') {
+                    hop = format!("{p_user}@{hop}");
+                }
+                if let Some(port) = p_port.filter(|p| *p != 22) {
+                    hop = format!("{hop}:{port}");
+                }
+                found.jumps.push((s.id, vec![hop]));
+            }
+            _ => found.unsupported += 1,
+        }
         s.name = unescape_putty(&raw_name);
         s.host = host;
         s.port = port.unwrap_or(22);
@@ -78,13 +99,12 @@ fn unescape_putty(name: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
+        if b[i] == b'%' && i + 2 < b.len()
+            && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(v);
                 i += 3;
                 continue;
             }
-        }
         out.push(b[i]);
         i += 1;
     }
@@ -111,7 +131,8 @@ struct Block {
     user: Option<String>,
     port: Option<u16>,
     identity: Option<String>,
-    jump: bool,
+    jump: Option<Vec<String>>,
+    command: bool,
 }
 
 fn parse_ssh_config(text: &str, home: Option<&Path>) -> Found {
@@ -164,7 +185,17 @@ fn parse_ssh_config(text: &str, home: Option<&Path>) -> Found {
                     "user" if target.user.is_none() => target.user = Some(v),
                     "port" if target.port.is_none() => target.port = v.parse().ok(),
                     "identityfile" if target.identity.is_none() => target.identity = Some(v),
-                    "proxyjump" | "proxycommand" => target.jump = true,
+                    "proxyjump" if target.jump.is_none() && !target.command => {
+                        let hops: Vec<String> = v.split(',').map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect();
+                        // "none" switches an inherited jump off.
+                        target.jump = Some(if hops.len() == 1 && hops[0].eq_ignore_ascii_case("none") { vec![] } else { hops });
+                    }
+                    "proxycommand" if target.jump.is_none() && !target.command => {
+                        target.command = !v.eq_ignore_ascii_case("none");
+                        if !target.command {
+                            target.jump = Some(vec![]);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -190,8 +221,11 @@ fn parse_ssh_config(text: &str, home: Option<&Path>) -> Found {
         if let Some(id) = b.identity.or_else(|| defaults.identity.clone()) {
             s.auth = Auth::Key { path: expand_home(&id, home) };
         }
-        if b.jump || defaults.jump {
-            found.jump += 1;
+        match b.jump.clone().or_else(|| if b.command { None } else { defaults.jump.clone() }) {
+            Some(hops) if !hops.is_empty() => found.jumps.push((s.id, hops)),
+            Some(_) => {}
+            None if b.command || defaults.command => found.unsupported += 1,
+            None => {}
         }
         s.group = "ssh config".into();
         found.servers.push(s);
@@ -219,6 +253,66 @@ pub fn merge(existing: &mut Vec<Server>, new: Vec<Server>) -> usize {
         }
     }
     added
+}
+
+/// Points imported servers at their jump hosts. A hop is a saved server's name or
+/// `[user@]host[:port]`; hops that match nothing saved become new servers in `group`.
+/// Servers that already have a proxy are left alone.
+pub fn link_jumps(servers: &mut Vec<Server>, jumps: Vec<(Uuid, Vec<String>)>, group: &str) -> usize {
+    let mut linked = 0;
+    for (id, hops) in jumps {
+        if !servers.iter().any(|s| s.id == id && s.proxy.is_none()) {
+            continue;
+        }
+        let mut prev: Option<Uuid> = None;
+        for hop in &hops {
+            let hid = find_or_add(servers, hop, group);
+            if let (Some(p), Some(h)) = (prev, servers.iter_mut().find(|s| s.id == hid))
+                && h.proxy.is_none() && h.id != p {
+                    h.proxy = Proxy::Jump { server: p };
+                }
+            prev = Some(hid);
+        }
+        if let (Some(p), Some(s)) = (prev, servers.iter_mut().find(|s| s.id == id))
+            && p != id {
+                s.proxy = Proxy::Jump { server: p };
+                linked += 1;
+            }
+    }
+    linked
+}
+
+fn find_or_add(servers: &mut Vec<Server>, hop: &str, group: &str) -> Uuid {
+    if let Some(s) = servers.iter().find(|s| s.name.eq_ignore_ascii_case(hop)) {
+        return s.id;
+    }
+    let (user, rest) = match hop.rsplit_once('@') {
+        Some((u, r)) => (Some(u), r),
+        None => (None, hop),
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok() && !h.contains(':') => (h, p.parse().ok()),
+        _ => (rest, None),
+    };
+    let host = host.trim_matches(['[', ']']);
+    if let Some(s) = servers.iter().find(|s| {
+        (s.host.eq_ignore_ascii_case(host) || s.name.eq_ignore_ascii_case(host))
+            && port.is_none_or(|p| p == s.port)
+            && user.is_none_or(|u| u == s.user)
+    }) {
+        return s.id;
+    }
+    let mut s = Server::new();
+    s.name = host.to_string();
+    s.host = host.to_string();
+    s.port = port.unwrap_or(22);
+    if let Some(u) = user {
+        s.user = u.to_string();
+    }
+    s.group = group.to_string();
+    let id = s.id;
+    servers.push(s);
+    id
 }
 
 #[cfg(test)]
@@ -261,7 +355,38 @@ Match host foo
         assert_eq!(web.auth, Auth::Key { path: Path::new("C:/Users/me").join(".ssh/id_ed25519") });
         let db = &f.servers[1];
         assert_eq!((db.host.as_str(), db.port, db.user.as_str()), ("db.internal", 22, "postgres"));
-        assert_eq!(f.jump, 1);
+        assert_eq!(f.jumps.len(), 1);
+        assert_eq!(f.unsupported, 0);
+    }
+
+    #[test]
+    fn jumps_link_to_saved_and_new_hosts() {
+        let cfg = "\
+Host web
+    HostName 203.0.113.5
+Host db
+    HostName db.internal
+    ProxyJump web
+Host deep
+    HostName 10.0.0.9
+    ProxyJump ops@bastion.example:2222,web
+Host cmd
+    HostName x
+    ProxyCommand nc %h %p
+";
+        let f = parse_ssh_config(cfg, None);
+        assert_eq!(f.unsupported, 1);
+        let mut all = Vec::new();
+        merge(&mut all, f.servers);
+        assert_eq!(link_jumps(&mut all, f.jumps, "ssh config"), 2);
+        let id = |n: &str| all.iter().find(|s| s.name == n).unwrap().id;
+        let get = |n: &str| all.iter().find(|s| s.name == n).unwrap();
+        assert_eq!(get("db").proxy, Proxy::Jump { server: id("web") });
+        assert_eq!(get("deep").proxy, Proxy::Jump { server: id("web") });
+        let bastion = get("bastion.example");
+        assert_eq!((bastion.user.as_str(), bastion.port), ("ops", 2222));
+        // web is both a host of its own and the second hop of deep: it gets the bastion in front.
+        assert_eq!(get("web").proxy, Proxy::Jump { server: id("bastion.example") });
     }
 
     /// Reads the real registry: `cargo test putty_live -- --ignored --nocapture`.
@@ -272,6 +397,6 @@ Match host foo
         for s in &f.servers {
             println!("{} | user {} | port {} | key {}", s.name, s.user, s.port, matches!(s.auth, Auth::Key { .. }));
         }
-        println!("jump: {}", f.jump);
+        println!("jumps: {} unsupported: {}", f.jumps.len(), f.unsupported);
     }
 }

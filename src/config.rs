@@ -28,6 +28,41 @@ pub struct Server {
     /// Free-form group shown as a folder in the sidebar. Empty = ungrouped.
     #[serde(default)]
     pub group: String,
+    /// How to reach the host: directly, through a SOCKS5/HTTP proxy, or through another saved server.
+    #[serde(default, skip_serializing_if = "Proxy::is_none")]
+    pub proxy: Proxy,
+    /// Unix time of the last connect, for the "recent" list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<u64>,
+}
+
+/// A hop in front of the SSH connection (PuTTY's "Proxy" page, OpenSSH's ProxyJump).
+/// Proxy passwords live in the credential store like everything else secret.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Proxy {
+    #[default]
+    None,
+    Socks5 {
+        host: String,
+        port: u16,
+        #[serde(default)]
+        user: String,
+    },
+    Http {
+        host: String,
+        port: u16,
+        #[serde(default)]
+        user: String,
+    },
+    /// Tunnel through another saved server (SSH direct-tcpip). Chains: that server may have its own proxy.
+    Jump { server: Uuid },
+}
+
+impl Proxy {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Proxy::None)
+    }
 }
 
 fn default_port() -> u16 {
@@ -44,6 +79,8 @@ impl Server {
             user: "root".into(),
             auth: Auth::Password,
             group: String::new(),
+            proxy: Proxy::None,
+            last_used: None,
         }
     }
 
@@ -88,6 +125,8 @@ pub struct Settings {
     pub blur: bool,
     /// Animated GLSL aurora behind the panels.
     pub animated_background: bool,
+    /// Falling snow behind the panels, December to February by the PC's date.
+    pub winter_snow: bool,
     /// Rotate the gradient on the focused pane border (Hyprland `borderangle`).
     pub border_animation: bool,
     /// Smooth cursor movement with a trail, like kitty's `cursor_trail`.
@@ -102,7 +141,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: "Catppuccin Mocha".into(),
+            theme: "Ghostly Night".into(),
             font_size: 13.5,
             line_height: 1.2,
             scrollback: 10_000,
@@ -120,7 +159,8 @@ impl Default for Settings {
             opacity: 0.86,
             blur: true,
             animated_background: true,
-            border_animation: true,
+            winter_snow: true,
+            border_animation: false,
             cursor_trail: true,
             animations: true,
             streamer_mode: true,

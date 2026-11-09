@@ -184,11 +184,10 @@ pub fn setup_overlay_window(
                 }
                 let alpha = (opacity.clamp(0.2, 1.0) * 255.0).round() as u8;
                 SetLayeredWindowAttributes(overlay_hwnd, 0, alpha, LWA_ALPHA);
-                if let Some(main) = main_window {
-                    if let Some(main_hwnd) = hwnd(main) {
+                if let Some(main) = main_window
+                    && let Some(main_hwnd) = hwnd(main) {
                         SetWindowLongPtrW(overlay_hwnd, GWLP_HWNDPARENT, main_hwnd as isize);
                     }
-                }
                 return true;
             }
         }
@@ -198,6 +197,32 @@ pub fn setup_overlay_window(
         let _ = (overlay_title, main_window, opacity);
     }
     false
+}
+
+/// Month of the PC's local date, 1..=12.
+#[cfg(windows)]
+pub fn local_month() -> u16 {
+    let mut st = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+    st.wMonth
+}
+
+/// Without a local-time API this falls back to the UTC month (off by a few hours at worst).
+#[cfg(not(windows))]
+pub fn local_month() -> u16 {
+    let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400) as i64;
+    // Howard Hinnant's civil_from_days, month only.
+    let z = days + 719_468;
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    (if mp < 10 { mp + 3 } else { mp - 9 }) as u16
+}
+
+/// Snow season: December to February.
+pub fn is_winter() -> bool {
+    matches!(local_month(), 12 | 1 | 2)
 }
 
 #[cfg(test)]
@@ -259,5 +284,3 @@ mod tests {
         }
     }
 }
-
-

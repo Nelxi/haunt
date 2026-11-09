@@ -18,6 +18,7 @@ use eframe::glow;
 use uuid::Uuid;
 
 use crate::config::{Auth, Config, CursorStyle, Server};
+use crate::import;
 use crate::fonts::icon;
 use crate::session::{ConnectSpec, PromptKind, Session, Status};
 use crate::shader::{self, Aurora, AuroraParams};
@@ -58,6 +59,13 @@ enum LaunchItem {
     Quick { user: String, host: String, port: u16 },
     NewServer,
     Settings,
+    Import(ImportSource),
+}
+
+#[derive(Clone, Copy)]
+enum ImportSource {
+    Putty,
+    SshConfig,
 }
 
 struct Toast {
@@ -177,6 +185,30 @@ impl HauntApp {
         self.toasts.push(Toast { text: text.into(), at, error });
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
+        }
+    }
+
+    fn import_sessions(&mut self, ctx: &egui::Context, src: ImportSource) {
+        let (found, label) = match src {
+            ImportSource::Putty => (import::putty(), "PuTTY"),
+            ImportSource::SshConfig => (import::ssh_config(), "~/.ssh/config"),
+        };
+        if found.servers.is_empty() {
+            self.notify(ctx, format!("No sessions found in {label}"), true);
+            return;
+        }
+        let total = found.servers.len();
+        let added = import::merge(&mut self.cfg.servers, found.servers);
+        let mut msg = match added {
+            0 => format!("All {total} sessions from {label} are already saved"),
+            n => format!("Imported {n} of {total} sessions from {label}"),
+        };
+        if found.jump > 0 && added > 0 {
+            msg.push_str(&format!(" ({} use a jump host, imported as direct)", found.jump));
+        }
+        self.notify(ctx, msg, false);
+        if added > 0 {
+            self.save(ctx);
         }
     }
 
@@ -777,6 +809,7 @@ impl HauntApp {
         let (m3, a3) = stagger(3);
         let servers: Vec<Server> = self.cfg.servers.iter().take(6).cloned().collect();
         let mut connect = None;
+        let mut import = None;
         if !servers.is_empty() {
             let cols = servers.len().min(3);
             let cw = 200.0;
@@ -829,6 +862,21 @@ impl HauntApp {
                     connect = Some(s.clone());
                 }
             }
+        } else {
+            // First run: offer to bring sessions over from PuTTY / OpenSSH.
+            let row = Rect::from_center_size(pos2(c.x, btn_y + 80.0 + (1.0 - m3) * 16.0), vec2(360.0, 34.0));
+            ui.scope_builder(UiBuilder::new().max_rect(row), |ui| {
+                ui.multiply_opacity(a3);
+                ui.horizontal(|ui| {
+                    if widgets::secondary(ui, t, icon::FOLDER, "Import PuTTY", vec2(160.0, 34.0)).clicked() {
+                        import = Some(ImportSource::Putty);
+                    }
+                    ui.add_space(8.0);
+                    if widgets::secondary(ui, t, icon::KEY, "Import ssh config", vec2(184.0, 34.0)).clicked() {
+                        import = Some(ImportSource::SshConfig);
+                    }
+                });
+            });
         }
 
         // Shortcut hints at the bottom.
@@ -846,6 +894,9 @@ impl HauntApp {
         }
         if let Some(s) = connect {
             self.connect(&ctx, &s);
+        }
+        if let Some(src) = import {
+            self.import_sessions(&ctx, src);
         }
     }
 
@@ -1108,6 +1159,7 @@ impl HauntApp {
         let t = self.theme();
         let opened = self.opened_at("settings", now);
         let mut close = false;
+        let mut import = None;
         let max_h = (ctx.content_rect().height() - 160.0).clamp(240.0, 620.0);
         let (_, dismissed) = widgets::dialog(ctx, t, Id::unique("settings"), opened, 560.0, |ui| {
             ui.horizontal(|ui| {
@@ -1180,9 +1232,25 @@ impl HauntApp {
                 let mut ka = s.keepalive_secs as f32;
                 slider(ui, t, "Keepalive", &mut ka, 0.0..=120.0, 5.0, "s, 0 = off");
                 s.keepalive_secs = ka as u64;
+
+                widgets::section(ui, t, icon::FOLDER, "Import");
+                ui.label(RichText::new("Adds sessions that are not saved yet. Passwords are never imported.").size(12.0).color(t.subtext));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if widgets::secondary(ui, t, icon::TERMINAL, "From PuTTY", vec2(150.0, 34.0)).clicked() {
+                        import = Some(ImportSource::Putty);
+                    }
+                    ui.add_space(6.0);
+                    if widgets::secondary(ui, t, icon::KEY, "From ~/.ssh/config", vec2(190.0, 34.0)).clicked() {
+                        import = Some(ImportSource::SshConfig);
+                    }
+                });
                 ui.add_space(10.0);
             });
         });
+        if let Some(src) = import {
+            self.import_sessions(ctx, src);
+        }
         if dismissed || close {
             self.show_settings = false;
             self.save(ctx);
@@ -1264,6 +1332,8 @@ impl HauntApp {
                         }
                         LaunchItem::NewServer => (icon::PLUS.to_string(), "New server".into(), "Ctrl+Shift+N".into(), t.ok),
                         LaunchItem::Settings => (icon::GEAR.to_string(), "Settings".into(), "Ctrl+,".into(), t.subtext),
+                        LaunchItem::Import(ImportSource::Putty) => (icon::FOLDER.to_string(), "Import from PuTTY".into(), "saved sessions in the registry".into(), t.subtext),
+                        LaunchItem::Import(ImportSource::SshConfig) => (icon::FOLDER.to_string(), "Import from ~/.ssh/config".into(), "Host blocks".into(), t.subtext),
                     };
                     let active = k == l.selected;
                     p.text(pos2(row.min.x + 22.0, row.center().y), Align2::CENTER_CENTER, ic, fonts::mono(14.0), color);
@@ -1301,6 +1371,7 @@ impl HauntApp {
                 }
                 Some(LaunchItem::NewServer) => self.editor = Some(Editor::new(Server::new(), true)),
                 Some(LaunchItem::Settings) => self.show_settings = true,
+                Some(LaunchItem::Import(src)) => self.import_sessions(ctx, src),
                 None => {}
             }
         }
@@ -1556,6 +1627,12 @@ fn launcher_items(servers: &[Server], query: &str) -> Vec<LaunchItem> {
     }
     if q.is_empty() || "settings".contains(&q) {
         items.push(LaunchItem::Settings);
+    }
+    if !q.is_empty() && ("import putty".contains(&q) || q.starts_with("imp")) {
+        items.push(LaunchItem::Import(ImportSource::Putty));
+    }
+    if !q.is_empty() && ("import ssh config".contains(&q) || q.starts_with("imp")) {
+        items.push(LaunchItem::Import(ImportSource::SshConfig));
     }
     items
 }

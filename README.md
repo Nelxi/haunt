@@ -91,7 +91,7 @@ haunt keeps its own `known_hosts` next to the config and also trusts `~/.ssh/kno
 
 - [x] terminal, SSH sessions, saved servers, themes
 - [x] glass UI, animations, launcher
-- [ ] import from PuTTY, Termius and `~/.ssh/config`
+- [x] import from PuTTY and `~/.ssh/config` (Termius keeps its hosts encrypted, so no import)
 - [ ] SSH agent / Pageant, keyboard-interactive (2FA)
 - [ ] streamer mode: IPs and secrets hidden from screen capture, visible to you
 - [ ] SFTP, port forwarding, split panes, snippets

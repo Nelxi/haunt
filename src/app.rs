@@ -101,7 +101,12 @@ pub struct HauntApp {
 impl HauntApp {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Handle) -> Self {
         fonts::install(&cc.egui_ctx);
-        let (cfg, load_error) = Config::load();
+        let (mut cfg, load_error) = Config::load();
+        // Debug builds: override opacity for visual tests without touching the saved config.
+        #[cfg(debug_assertions)]
+        if let Some(op) = std::env::var("HAUNT_OPACITY").ok().and_then(|v| v.parse().ok()) {
+            cfg.settings.opacity = op;
+        }
         let theme = theme::by_name(&cfg.settings.theme);
 
         platform::round_corners(cc);
@@ -145,6 +150,18 @@ impl HauntApp {
             app.toast_at(e, 0.0, true);
         }
         app
+    }
+
+    /// (background alpha, card alpha). With blur on, the two layers stack to the
+    /// configured opacity: 1 - (1 - a)^2 = opacity. Without blur the window is opaque.
+    fn layer_alpha(&self) -> (f32, f32) {
+        let op = self.cfg.settings.opacity.clamp(0.3, 1.0);
+        if self.blur_active {
+            let a = 1.0 - (1.0 - op).sqrt();
+            (a, a)
+        } else {
+            (1.0, op)
+        }
     }
 
     fn theme(&self) -> &'static Theme {
@@ -370,7 +387,7 @@ impl HauntApp {
     fn background(&self, ui: &egui::Ui, rect: Rect, maximized: bool) {
         let t = self.theme();
         let p = ui.painter();
-        let alpha = if self.blur_active { self.cfg.settings.opacity.clamp(0.3, 1.0) * 0.82 } else { 1.0 };
+        let alpha = self.layer_alpha().0;
         match &self.aurora {
             Some(a) if self.cfg.settings.animated_background => {
                 shader::paint(
@@ -586,7 +603,7 @@ impl HauntApp {
         let set = &self.cfg.settings;
         let radius = set.rounding;
         let p = ui.painter().clone();
-        fx::glass(&p, rect, radius, t.mantle.gamma_multiply(set.opacity.clamp(0.3, 1.0)), t.overlay.gamma_multiply(0.8));
+        fx::glass(&p, rect, radius, t.mantle.gamma_multiply(self.layer_alpha().1), t.overlay.gamma_multiply(0.8));
 
         let inner = rect.shrink2(vec2(14.0, 14.0));
         let mut connect: Option<Server> = None;
@@ -711,7 +728,7 @@ impl HauntApp {
         let start = self.started.unwrap_or(now);
         let set = &self.cfg.settings;
         let p = ui.painter().clone();
-        fx::glass(&p, rect, set.rounding, t.mantle.gamma_multiply(set.opacity.clamp(0.3, 1.0) * 0.85), t.overlay.gamma_multiply(0.8));
+        fx::glass(&p, rect, set.rounding, t.mantle.gamma_multiply(self.layer_alpha().1 * 0.9), t.overlay.gamma_multiply(0.8));
 
         let stagger = |i: usize| {
             let k = anim::since(&ctx, start + 0.1 + i as f64 * 0.08, 0.7);
@@ -1338,10 +1355,13 @@ impl eframe::App for HauntApp {
             self.blur_wanted = self.cfg.settings.blur;
             self.blur_active = platform::set_blur(frame, self.blur_wanted);
             if self.blur_wanted && !self.blur_active {
-                self.notify(&ctx, "Acrylic blur is not available on this system.", true);
+                self.notify(&ctx, "Acrylic needs Windows 11 22H2 or newer.", true);
             }
         }
 
+        if self.blur_active {
+            platform::hide_caption_buttons(frame);
+        }
         let (focused, maximized, dt) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().maximized.unwrap_or(false), i.stable_dt));
         let animate = self.cfg.settings.animations;
         if focused && animate {
@@ -1412,6 +1432,7 @@ impl eframe::App for HauntApp {
                 settings: &self.cfg.settings,
                 time: self.clock,
                 window_focused: focused,
+                pane_alpha: self.layer_alpha().1,
             };
             let s = &mut self.sessions[self.active];
             ui.scope_builder(UiBuilder::new().max_rect(main.translate(off)), |ui| {

@@ -132,7 +132,11 @@ pub struct Config {
     pub servers: Vec<Server>,
 }
 
+/// `%APPDATA%\haunt\config`, or `HAUNT_CONFIG_DIR` if set (portable installs, testing).
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("HAUNT_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
     directories::ProjectDirs::from("", "", "haunt").map(|d| d.config_dir().to_path_buf())
 }
 

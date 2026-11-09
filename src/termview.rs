@@ -63,6 +63,8 @@ pub struct Look<'a> {
     pub time: f32,
     /// Whether the OS window has focus (animations pause otherwise).
     pub window_focused: bool,
+    /// Fill alpha for the pane (already accounts for the layer underneath).
+    pub pane_alpha: f32,
 }
 
 struct Metrics {
@@ -122,7 +124,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut Session, look: &Look<'_>, input_enabled: 
     if focus_t > 0.0 {
         fx::glow(&painter, rect, radius, theme.accent.gamma_multiply(0.18 * focus_t), 22.0, 0.0);
     }
-    painter.rect_filled(rect, CornerRadius::same(radius as u8), theme.bg.gamma_multiply(set.opacity.clamp(0.3, 1.0)));
+    painter.rect_filled(rect, CornerRadius::same(radius as u8), theme.bg.gamma_multiply(look.pane_alpha));
     let animate_border = set.border_animation && set.animations && look.window_focused && focused;
     let angle = if animate_border { look.time * TAU / 3.0 } else { PI / 4.0 };
     if focus_t > 0.01 {

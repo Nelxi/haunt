@@ -23,8 +23,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "fs"] }
 toml = "1.2.1"
 uuid = { version = "1.29.1", features = ["v4", "serde"] }
-window-vibrancy = "0.8.1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 opt-level = 3

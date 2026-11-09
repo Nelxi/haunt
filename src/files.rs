@@ -147,7 +147,7 @@ fn cancelled() -> String {
 // ---------------------------------------------------------------- formatting
 
 /// "4,2 MB" (the decimal mark follows the interface language).
-fn human_size(n: u64) -> String {
+pub fn human_size(n: u64) -> String {
     if n < 1024 {
         return tr!("{n} B", n = n);
     }

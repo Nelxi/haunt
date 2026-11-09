@@ -22,7 +22,7 @@ pub const LABEL_H: f32 = 20.0;
 /// Corner radius of controls.
 pub const RADIUS: f32 = 12.0;
 
-fn hover_t(ui: &Ui, resp: &Response) -> f32 {
+pub fn hover_t(ui: &Ui, resp: &Response) -> f32 {
     anim::toggle(ui.ctx(), resp.id.with("hover"), resp.hovered(), 0.14)
 }
 
@@ -123,37 +123,71 @@ pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, size: egui::Vec2, danger:
     resp
 }
 
-/// Width of one segment of [`segments`]: icon, gap, label and side padding.
-pub fn segment_width(ui: &Ui, label: &str) -> f32 {
-    let g = ui.painter().layout_no_wrap(label.to_owned(), fonts::medium(12.5), Color32::WHITE);
-    (14.0 + 14.0 + 7.0 + g.size().x + 14.0).round()
+/// One choice of [`segments`].
+pub struct Segment<'a> {
+    pub icon: &'a str,
+    pub label: &'a str,
+    /// A small counter after the label; 0 hides it.
+    pub badge: usize,
 }
 
-/// Two side-by-side choices with a knob that slides to the chosen one (like a macOS
-/// segmented control). `items` are (icon, label, width); returns the clicked index.
-pub fn segments(ui: &mut Ui, t: &Theme, id: Id, rect: Rect, items: [(&str, &str, f32); 2], chosen: usize) -> Option<usize> {
-    let k = anim::toggle(ui.ctx(), id.with("knob"), chosen == 1, 0.22);
+const BADGE_GAP: f32 = 6.0;
+
+fn badge_width(ui: &Ui, n: usize) -> f32 {
+    if n == 0 {
+        return 0.0;
+    }
+    let g = ui.painter().layout_no_wrap(n.to_string(), fonts::medium(10.5), Color32::WHITE);
+    BADGE_GAP + (g.size().x + 10.0).max(16.0)
+}
+
+/// Width of one segment of [`segments`]: icon, gap, label, badge and side padding.
+pub fn segment_width(ui: &Ui, seg: &Segment) -> f32 {
+    let g = ui.painter().layout_no_wrap(seg.label.to_owned(), fonts::medium(12.5), Color32::WHITE);
+    (14.0 + 14.0 + 7.0 + g.size().x + badge_width(ui, seg.badge) + 14.0).round()
+}
+
+/// Width of the whole control.
+pub fn segments_width(ui: &Ui, items: &[Segment]) -> f32 {
+    items.iter().map(|s| segment_width(ui, s)).sum::<f32>() + 6.0
+}
+
+/// Side-by-side choices with a knob that slides to the chosen one (like a macOS segmented
+/// control). Returns the clicked index.
+pub fn segments(ui: &mut Ui, t: &Theme, id: Id, rect: Rect, items: &[Segment], chosen: usize) -> Option<usize> {
+    let widths: Vec<f32> = items.iter().map(|s| segment_width(ui, s)).collect();
+    let k = ui.ctx().animate_value_with_time(id.with("knob"), chosen as f32, 0.22);
     let p = ui.painter();
     let r = rect.height() / 2.0;
     p.rect(rect, cr(r), Color32::from_black_alpha(70), Stroke::new(1.0, Color32::from_white_alpha(12)), StrokeKind::Inside);
     let inner = rect.shrink(3.0);
     let seg = |i: usize| {
-        let x0 = if i == 0 { inner.min.x } else { inner.min.x + items[0].2 };
-        Rect::from_min_size(pos2(x0, inner.min.y), vec2(items[i].2, inner.height()))
+        let x0 = inner.min.x + widths[..i].iter().sum::<f32>();
+        Rect::from_min_size(pos2(x0, inner.min.y), vec2(widths[i], inner.height()))
     };
-    let (a, b) = (seg(0), seg(1));
-    let knob = Rect::from_min_max(a.min + (b.min - a.min) * k, a.max + (b.max - a.max) * k);
+    // The knob slides between the two segments around `k`.
+    let lo = (k.floor() as usize).min(items.len() - 1);
+    let hi = (lo + 1).min(items.len() - 1);
+    let f = k - lo as f32;
+    let (a, b) = (seg(lo), seg(hi));
+    let knob = Rect::from_min_max(a.min + (b.min - a.min) * f, a.max + (b.max - a.max) * f);
     fx::plate(p, knob, knob.height() / 2.0, t.accent.gamma_multiply(0.16), t.accent, 0.8);
     let mut clicked = None;
-    for (i, (ic, label, _)) in items.iter().enumerate() {
+    for (i, it) in items.iter().enumerate() {
         let s = seg(i);
         let resp = ui.interact(s, id.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-        let near = if i == 1 { k } else { 1.0 - k };
+        let near = (1.0 - (k - i as f32).abs()).clamp(0.0, 1.0);
         let h = hover_t(ui, &resp);
         let color = mix(mix(t.subtext, t.text, h * 0.7), t.text, near);
         let icolor = mix(mix(t.subtext, t.text, h * 0.7), t.accent, near);
-        fx::glyph(p, pos2(s.min.x + 14.0 + 7.0, s.center().y), ic, fonts::mono(12.0), icolor);
-        fx::text(p, pos2(s.min.x + 14.0 + 14.0 + 7.0, s.center().y), Align2::LEFT_CENTER, *label, fonts::medium(12.5), color);
+        fx::glyph(p, pos2(s.min.x + 14.0 + 7.0, s.center().y), it.icon, fonts::mono(12.0), icolor);
+        let lr = fx::text(p, pos2(s.min.x + 14.0 + 14.0 + 7.0, s.center().y), Align2::LEFT_CENTER, it.label, fonts::medium(12.5), color);
+        if it.badge > 0 {
+            let w = badge_width(ui, it.badge) - BADGE_GAP;
+            let br = Rect::from_center_size(pos2(lr.max.x + BADGE_GAP + w / 2.0, s.center().y), vec2(w, 16.0));
+            p.rect_filled(br, cr(8.0), t.accent.gamma_multiply(0.85));
+            fx::text(p, br.center(), Align2::CENTER_CENTER, it.badge.to_string(), fonts::medium(10.5), t.crust);
+        }
         if resp.clicked() && i != chosen {
             clicked = Some(i);
         }
@@ -198,6 +232,24 @@ pub fn toggle(ui: &mut Ui, t: &Theme, on: &mut bool, label: &str, hint: &str) ->
     }
     let knob_x = track.min.x + 12.0 + k * 16.0;
     p.circle_filled(pos2(knob_x, track.center().y), 9.0, mix(t.text, Color32::WHITE, k));
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Just the switch of [`toggle`], without a label.
+pub fn switch(ui: &mut Ui, t: &Theme, on: &mut bool) -> Response {
+    let (track, mut resp) = ui.allocate_exact_size(vec2(40.0, 24.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let k = anim::toggle(ui.ctx(), resp.id.with("knob"), *on, 0.18);
+    let h = hover_t(ui, &resp);
+    let p = ui.painter();
+    p.rect_filled(track, cr(12.0), mix(mix(Color32::from_rgb(0x2a, 0x26, 0x36), Color32::from_rgb(0x36, 0x31, 0x45), h), t.accent, k));
+    if k > 0.0 {
+        fx::vgradient(p, track, 12.0, |y| Color32::from_white_alpha(((1.0 - y) * 30.0 * k) as u8));
+    }
+    p.circle_filled(pos2(track.min.x + 12.0 + k * 16.0, track.center().y), 9.0, mix(t.text, Color32::WHITE, k));
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 

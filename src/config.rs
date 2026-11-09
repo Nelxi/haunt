@@ -34,6 +34,58 @@ pub struct Server {
     /// Unix time of the last connect, for the "recent" list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used: Option<u64>,
+    /// Port forwards that come up with every connection to this server.
+    #[serde(default, rename = "tunnel", skip_serializing_if = "Vec::is_empty")]
+    pub tunnels: Vec<Tunnel>,
+}
+
+/// One port forward, like `ssh -L`, `-R` or `-D`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Tunnel {
+    pub id: Uuid,
+    pub kind: TunnelKind,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Listen on every interface instead of loopback: other devices on the network can use it.
+    #[serde(default)]
+    pub lan: bool,
+    /// The listening port: on this PC for `Local` and `Socks`, on the server for `Remote`.
+    pub port: u16,
+    /// Where connections go: a host seen from the server (`Local`) or from this PC (`Remote`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to_host: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub to_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelKind {
+    /// A port on this PC reaches a host behind the server (`ssh -L`).
+    Local,
+    /// A port on the server reaches a host on this PC's side (`ssh -R`).
+    Remote,
+    /// A SOCKS5 / HTTP proxy on this PC whose traffic leaves from the server (`ssh -D`).
+    Socks,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_zero(n: &u16) -> bool {
+    *n == 0
+}
+
+impl Tunnel {
+    pub fn new(kind: TunnelKind) -> Self {
+        Self { id: Uuid::new_v4(), kind, enabled: true, lan: false, port: 0, to_host: String::new(), to_port: 0 }
+    }
+
+    /// Complete enough to start.
+    pub fn is_valid(&self) -> bool {
+        self.port != 0 && (self.kind == TunnelKind::Socks || (!self.to_host.trim().is_empty() && self.to_port != 0))
+    }
 }
 
 /// A hop in front of the SSH connection (PuTTY's "Proxy" page, OpenSSH's ProxyJump).
@@ -81,6 +133,7 @@ impl Server {
             group: String::new(),
             proxy: Proxy::None,
             last_used: None,
+            tunnels: Vec::new(),
         }
     }
 
@@ -239,4 +292,34 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::write(&tmp, data).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunnels_round_trip() {
+        let mut s = Server::new();
+        s.host = "example.com".into();
+        let mut l = Tunnel::new(TunnelKind::Local);
+        l.port = 5433;
+        l.to_host = "db".into();
+        l.to_port = 5432;
+        let mut d = Tunnel::new(TunnelKind::Socks);
+        d.port = 1080;
+        d.lan = true;
+        s.tunnels = vec![l, d];
+        let mut cfg = Config::default();
+        cfg.servers.push(s);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[[server.tunnel]]") && text.contains("kind = \"socks\""), "{text}");
+        // A SOCKS rule has no target, so none is written.
+        assert_eq!(text.matches("to_host").count(), 1, "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.servers[0].tunnels, cfg.servers[0].tunnels);
+        // Servers saved before tunnels existed still load.
+        let old: Config = toml::from_str("[[server]]\nid = \"6f1c0e8e-3b8a-4c39-9a51-3c5b8f0b2d11\"\nname = \"x\"\nhost = \"h\"\nport = 22\nuser = \"u\"\n[server.auth]\nkind = \"password\"\n").unwrap();
+        assert!(old.servers[0].tunnels.is_empty());
+    }
 }

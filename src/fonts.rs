@@ -57,6 +57,8 @@ pub mod icon {
     pub const CARET_UP: &str = "\u{f0d8}";
     pub const CARET_DOWN: &str = "\u{f0d7}";
     pub const CHECK: &str = "\u{f00c}";
+    pub const TUNNEL: &str = "\u{f0ec}";
+    pub const ARROW_LEFT: &str = "\u{f060}";
 }
 
 fn fonts_dir() -> PathBuf {

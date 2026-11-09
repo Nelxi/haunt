@@ -205,14 +205,16 @@ impl HauntApp {
             }
             Ok("settings") => app.show_settings = true,
             Ok("launcher") => app.launcher = Some(Launcher { query: String::new(), selected: 0 }),
-            Ok("connect") | Ok("files") => {
+            Ok("connect") | Ok("files") | Ok("tunnels") => {
                 if let Some(s) = app.cfg.servers.first().cloned() {
                     app.connect(&cc.egui_ctx, &s);
                 }
-                if std::env::var("HAUNT_PREVIEW").as_deref() == Ok("files")
-                    && let Some(s) = app.sessions.last_mut()
-                {
-                    s.show_files = true;
+                if let Some(s) = app.sessions.last_mut() {
+                    match std::env::var("HAUNT_PREVIEW").as_deref() {
+                        Ok("files") => s.page = crate::session::Page::Files,
+                        Ok("tunnels") => s.page = crate::session::Page::Tunnels,
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -353,7 +355,7 @@ impl HauntApp {
             || self.confirm_delete.is_some()
             || self.launcher.is_some()
             || self.active_prompt()
-            || self.sessions.get(self.active).is_some_and(|s| s.show_files && s.files.as_ref().is_some_and(|f| f.modal_open()))
+            || self.sessions.get(self.active).is_some_and(|s| s.page == crate::session::Page::Files && s.files.as_ref().is_some_and(|f| f.modal_open()))
     }
 
     /// Time the dialog `key` was opened (records it on first call).
@@ -420,18 +422,44 @@ impl HauntApp {
 
     // ------------------------------------------------------------ shortcuts
 
-    /// Switches the active tab between its terminal and its file manager.
-    fn toggle_files(&mut self) {
+    /// New port forwarding rules for the active tab: applied right away and, for a saved
+    /// server, kept in the config (other open tabs of that server pick them up too).
+    fn apply_tunnels(&mut self, ctx: &egui::Context, rules: Vec<crate::config::Tunnel>) {
+        let Some(id) = self.sessions.get(self.active).map(|s| s.spec.server_id) else { return };
+        match id {
+            Some(id) => {
+                let active = self.active;
+                for (i, s) in self.sessions.iter_mut().enumerate().filter(|(_, s)| s.spec.server_id == Some(id)) {
+                    s.set_tunnels(rules.clone(), ctx);
+                    // The active tab's editor already shows them, maybe with a field mid-edit.
+                    if i != active
+                        && let Some(ed) = s.tunnels_ui.as_mut()
+                    {
+                        ed.reload(&rules);
+                    }
+                }
+                if let Some(srv) = self.cfg.servers.iter_mut().find(|x| x.id == id) {
+                    srv.tunnels = rules;
+                    self.save(ctx);
+                }
+            }
+            None => self.sessions[self.active].set_tunnels(rules, ctx),
+        }
+    }
+
+    /// Shows `page` in the active tab, or goes back to the terminal if it is already shown.
+    fn toggle_page(&mut self, page: crate::session::Page) {
+        use crate::session::Page;
         if let Some(s) = self.sessions.get_mut(self.active) {
-            s.show_files = !s.show_files;
-            s.want_focus = !s.show_files;
+            s.page = if s.page == page { Page::Terminal } else { page };
+            s.want_focus = s.page == Page::Terminal;
         }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump, streamer, files) = ctx.input_mut(|i| {
+        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump, streamer, files, tunnels) = ctx.input_mut(|i| {
             let jump = digits.iter().position(|k| i.consume_key(Modifiers::CTRL, *k));
             (
                 i.consume_key(Modifiers::CTRL, Key::Tab),
@@ -445,10 +473,14 @@ impl HauntApp {
                 jump,
                 i.consume_key(cs, Key::S),
                 i.consume_key(cs, Key::F),
+                i.consume_key(cs, Key::U),
             )
         });
         if files {
-            self.toggle_files();
+            self.toggle_page(crate::session::Page::Files);
+        }
+        if tunnels {
+            self.toggle_page(crate::session::Page::Tunnels);
         }
         let n = self.sessions.len();
         if n > 0 && next {
@@ -593,19 +625,21 @@ impl HauntApp {
         place(4.0, 0.0);
         let launch_r = place(32.0, 32.0);
         let has_tab = !self.sessions.is_empty();
-        // Terminal | Files switch for the active tab.
+        // Terminal | Files | Tunnels switch for the active tab.
+        let active_tunnels = self.sessions.get(self.active).map_or(0, |s| s.tunnels_active());
         let seg_items = [
-            (icon::TERMINAL, tr!("Terminal"), widgets::segment_width(ui, tr!("Terminal"))),
-            (icon::FOLDER, tr!("Files"), widgets::segment_width(ui, tr!("Files"))),
+            widgets::Segment { icon: icon::TERMINAL, label: tr!("Terminal"), badge: 0 },
+            widgets::Segment { icon: icon::FOLDER, label: tr!("Files"), badge: 0 },
+            widgets::Segment { icon: icon::TUNNEL, label: tr!("Tunnels"), badge: active_tunnels },
         ];
         let files_r = if has_tab {
             place(10.0, 0.0);
-            place(seg_items[0].2 + seg_items[1].2 + 6.0, 30.0)
+            place(widgets::segments_width(ui, &seg_items), 30.0)
         } else {
             Rect::NOTHING
         };
         let controls_left = if has_tab { files_r.min.x } else { launch_r.min.x } - 12.0;
-        let files_on = self.sessions.get(self.active).is_some_and(|s| s.show_files);
+        let page = self.sessions.get(self.active).map_or(crate::session::Page::Terminal, |s| s.page);
 
         let mut bt = |r: Rect, ic: &str, danger: bool, tip: &str| {
             let resp = ui.scope_builder(UiBuilder::new().max_rect(r), |ui| widgets::icon_button(ui, t, ic, r.size(), danger)).inner;
@@ -627,9 +661,12 @@ impl HauntApp {
             self.launcher = Some(Launcher { query: String::new(), selected: 0 });
         }
         if has_tab
-            && widgets::segments(ui, t, Id::unique("files-switch"), files_r, seg_items, usize::from(files_on)).is_some()
+            && let Some(i) = widgets::segments(ui, t, Id::unique("page-switch"), files_r, &seg_items, page as usize)
+            && let Some(s) = self.sessions.get_mut(self.active)
         {
-            self.toggle_files();
+            use crate::session::Page;
+            s.page = [Page::Terminal, Page::Files, Page::Tunnels][i];
+            s.want_focus = s.page == Page::Terminal;
         }
 
         // Tabs start one gap after the wordmark.
@@ -1137,6 +1174,7 @@ impl HauntApp {
                     keepalive: Duration::from_secs(self.cfg.settings.keepalive_secs),
                     via: None,
                     reconnect: false,
+                    tunnels: Vec::new(),
                 };
                 self.open_spec(&ctx, format!("{user}@{host}"), spec);
             } else if !q.is_empty() {
@@ -1432,7 +1470,12 @@ impl HauntApp {
                     self.notify(ctx, tr!("Could not store the proxy password: {e}", e = e), true);
                 }
             match self.cfg.servers.iter_mut().find(|s| s.id == server.id) {
-                Some(existing) => *existing = server.clone(),
+                Some(existing) => {
+                    // Tunnels are edited on their own page; keep what is saved there.
+                    let tunnels = std::mem::take(&mut existing.tunnels);
+                    *existing = server.clone();
+                    existing.tunnels = tunnels;
+                }
                 None => self.cfg.servers.push(server.clone()),
             }
             self.save(ctx);
@@ -1768,6 +1811,7 @@ impl HauntApp {
                         keepalive: Duration::from_secs(self.cfg.settings.keepalive_secs),
                         via: None,
                         reconnect: false,
+                        tunnels: Vec::new(),
                     };
                     self.open_spec(ctx, format!("{user}@{host}"), spec);
                 }
@@ -1972,6 +2016,7 @@ impl eframe::App for HauntApp {
 
         let input_enabled = !self.modal_open();
         let mut reconnect = false;
+        let mut tunnels_changed = None;
         if !self.sessions.is_empty() {
             let (at, dir, fresh) = self.switch;
             let k = if animate { anim::since(&ctx, at, 0.42) } else { 1.0 };
@@ -1990,7 +2035,7 @@ impl eframe::App for HauntApp {
             let rt = self.rt.clone();
             ui.scope_builder(UiBuilder::new().max_rect(main.translate(off)), |ui| {
                 ui.multiply_opacity(alpha);
-                if s.show_files {
+                if s.page == crate::session::Page::Files {
                     let mut files = s.files.take().unwrap_or_else(|| Box::new(crate::files::Files::new(s.id)));
                     let look = crate::files::Look {
                         theme: t,
@@ -2001,12 +2046,25 @@ impl eframe::App for HauntApp {
                     };
                     files.show(ui, s, &look, &rt, input_enabled);
                     s.files = Some(files);
+                } else if s.page == crate::session::Page::Tunnels {
+                    let mut editor = s.tunnels_ui.take().unwrap_or_else(|| Box::new(crate::tunnels::Editor::new(&s.spec.tunnels)));
+                    let look = crate::tunnels::Look {
+                        theme: t,
+                        pane_alpha: look.pane_alpha,
+                        radius: look.settings.rounding.clamp(0.0, 30.0),
+                        gaps: look.settings.gaps,
+                    };
+                    tunnels_changed = editor.show(ui, s, &look, input_enabled);
+                    s.tunnels_ui = Some(editor);
                 } else if let termview::Action::Reconnect = termview::show(ui, s, &look, input_enabled) {
                     reconnect = true;
                 }
             });
         } else {
             self.welcome(ui, main);
+        }
+        if let Some(rules) = tunnels_changed {
+            self.apply_tunnels(&ctx, rules);
         }
         if reconnect {
             let rt = self.rt.clone();
@@ -2035,7 +2093,7 @@ impl eframe::App for HauntApp {
         // keyboard back to the terminal so keys don't silently go nowhere.
         if !self.modal_open() && ctx.memory(|m| m.focused().is_none())
             && let Some(s) = self.sessions.get_mut(self.active)
-            && !s.show_files {
+            && s.page == crate::session::Page::Terminal {
                 s.want_focus = true;
                 ctx.request_repaint();
             }

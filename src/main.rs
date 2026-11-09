@@ -17,6 +17,7 @@ mod termview;
 mod theme;
 mod veil;
 mod widgets;
+mod tunnels;
 
 use eframe::egui;
 

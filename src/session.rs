@@ -25,6 +25,8 @@ use parking_lot::Mutex;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key};
 use russh::{ChannelMsg, Disconnect, client};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -60,6 +62,12 @@ pub enum Input {
     RetryNow,
     /// Open an SFTP channel inside this connection (for the file manager).
     OpenSftp(oneshot::Sender<Result<SftpSession, String>>),
+    /// A `direct-tcpip` channel to `host:port` as seen from the server (`-L`, `-D`).
+    OpenDirect { host: String, port: u16, from_host: String, from_port: u16, reply: crate::tunnels::OpenReply },
+    /// Ask the server to listen on `bind:port` and forward connections to us (`-R`).
+    RemoteForward { bind: String, port: u16, reply: oneshot::Sender<Result<(), String>> },
+    /// The tab's port forwarding rules changed.
+    Tunnels(Vec<config::Tunnel>),
     Close,
 }
 
@@ -99,6 +107,10 @@ pub struct Shared {
     /// How many times the session got connected. An SFTP channel opened under an older
     /// count died with that connection.
     pub connects: u64,
+    /// State of each port forwarding rule, by rule id.
+    pub tunnels: HashMap<Uuid, crate::tunnels::Live>,
+    /// Active `-R` rules by the port the server listens on.
+    pub remote: HashMap<u32, crate::tunnels::RemoteTarget>,
     /// Sender into the currently running task; replaced on reconnect.
     tx: mpsc::UnboundedSender<Input>,
 }
@@ -137,6 +149,8 @@ pub struct ConnectSpec {
     pub via: Option<Box<Via>>,
     /// Reconnect by itself when an established connection drops.
     pub reconnect: bool,
+    /// Port forwards that come up with the connection.
+    pub tunnels: Vec<config::Tunnel>,
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +196,7 @@ impl ConnectSpec {
             keepalive: Duration::from_secs(keepalive_secs.max(5)),
             via: via.map(Box::new),
             reconnect: false,
+            tunnels: s.tunnels.clone(),
         }
     }
 
@@ -209,8 +224,17 @@ pub struct Session {
     pub view: crate::termview::ViewState,
     /// The tab's file manager, created the first time it is opened.
     pub files: Option<Box<crate::files::Files>>,
-    /// The tab shows the file manager instead of the terminal.
-    pub show_files: bool,
+    /// What the tab shows.
+    pub page: Page,
+    /// The port forwarding editor, created the first time it is opened.
+    pub tunnels_ui: Option<Box<crate::tunnels::Editor>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Terminal,
+    Files,
+    Tunnels,
 }
 
 impl Session {
@@ -230,8 +254,11 @@ impl Session {
             title: None,
             size,
             connects: 0,
+            tunnels: HashMap::new(),
+            remote: HashMap::new(),
             tx,
         }));
+        crate::tunnels::mark_idle(&shared, ctx, &spec.tunnels);
         let term = Term::new(term_config, &size, Listener { shared: shared.clone() });
         let mut s = Self {
             id,
@@ -243,7 +270,8 @@ impl Session {
             want_focus: true,
             view: Default::default(),
             files: None,
-            show_files: false,
+            page: Page::Terminal,
+            tunnels_ui: None,
         };
         s.spawn(rx, rt, ctx);
         s
@@ -299,6 +327,28 @@ impl Session {
         let (tx, rx) = oneshot::channel();
         sh.tx.send(Input::OpenSftp(tx)).ok()?;
         Some(rx)
+    }
+
+    /// Replaces the port forwarding rules; a connected tab applies them right away.
+    pub fn set_tunnels(&mut self, rules: Vec<config::Tunnel>, ctx: &egui::Context) {
+        self.spec.tunnels = rules.clone();
+        let sh = self.shared.lock();
+        let connected = sh.status == Status::Connected;
+        let _ = sh.tx.send(Input::Tunnels(rules));
+        drop(sh);
+        if !connected {
+            crate::tunnels::mark_idle(&self.shared, ctx, &self.spec.tunnels);
+        }
+    }
+
+    /// The rule's current state and counters.
+    pub fn tunnel_live(&self, id: Uuid) -> Option<crate::tunnels::Live> {
+        self.shared.lock().tunnels.get(&id).cloned()
+    }
+
+    /// How many rules are running right now.
+    pub fn tunnels_active(&self) -> usize {
+        self.shared.lock().tunnels.values().filter(|l| l.state == crate::tunnels::State::Active).count()
     }
 
     pub fn connects(&self) -> u64 {
@@ -503,7 +553,12 @@ impl Task {
                     Some(Input::RetryNow) => break,
                     Some(Input::Close) | None => return false,
                     // Typing goes nowhere while offline; the size is re-sent on connect.
-                    Some(Input::Data(_)) | Some(Input::Resize(_)) | Some(Input::OpenSftp(_)) => {}
+                    Some(Input::Tunnels(rules)) => {
+                        crate::tunnels::mark_idle(&self.shared, &self.ctx, &rules);
+                        self.spec.tunnels = rules;
+                    }
+                    // Requests for a connection that isn't there: dropping the reply says so.
+                    Some(Input::Data(_) | Input::Resize(_) | Input::OpenSftp(_) | Input::OpenDirect { .. } | Input::RemoteForward { .. }) => {}
                 },
             }
         }
@@ -545,6 +600,14 @@ impl Task {
         *was_connected = true;
         self.ctx.request_repaint();
 
+        // Port forwards. Channel and listen requests wait for the server's answer, so they run
+        // side by side here instead of holding up the terminal.
+        let tx = self.shared.lock().tx.clone();
+        let mut runner = crate::tunnels::Runner::new(tx, self.shared.clone(), self.ctx.clone());
+        let _ = runner.sync(&self.spec.tunnels);
+        let h = &handle;
+        let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = FuturesUnordered::new();
+
         let mut channel = channel;
         let mut exit_status: Option<u32> = None;
         // True when the server ended the channel (the shell exited); false when the whole
@@ -558,6 +621,25 @@ impl Task {
                         let _ = channel.window_change(s.cols as u32, s.rows as u32, 0, 0).await;
                     }
                     Some(Input::RetryNow) => {}
+                    Some(Input::OpenDirect { host, port, from_host, from_port, reply }) => {
+                        pending.push(Box::pin(async move {
+                            let r = h.channel_open_direct_tcpip(host, u32::from(port), from_host, u32::from(from_port)).await;
+                            let _ = reply.send(r.map_err(|e| e.to_string()));
+                        }));
+                    }
+                    Some(Input::RemoteForward { bind, port, reply }) => {
+                        pending.push(Box::pin(async move {
+                            let r = h.tcpip_forward(bind, u32::from(port)).await;
+                            let _ = reply.send(r.map(|_| ()).map_err(|e| e.to_string()));
+                        }));
+                    }
+                    Some(Input::Tunnels(rules)) => {
+                        // Cancel first and wait for it, so a rule that moved can listen again.
+                        for (bind, port) in runner.sync(&rules) {
+                            let _ = h.cancel_tcpip_forward(bind, u32::from(port)).await;
+                        }
+                        self.spec.tunnels = rules;
+                    }
                     Some(Input::OpenSftp(reply)) => {
                         // The channel request is quick; the SFTP handshake runs on its own task
                         // so the terminal keeps flowing.
@@ -579,6 +661,8 @@ impl Task {
                         }
                     }
                     Some(Input::Close) | None => {
+                        drop(runner);
+                        drop(pending);
                         let _ = channel.eof().await;
                         let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
                         close_hops(hops).await;
@@ -596,8 +680,11 @@ impl Task {
                     None => break,
                     _ => {}
                 },
+                Some(()) = pending.next(), if !pending.is_empty() => {}
             }
         }
+        drop(runner);
+        drop(pending);
 
         if ended_by_server || exit_status.is_some() {
             let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
@@ -980,6 +1067,27 @@ struct HostKeyCheck {
 
 impl client::Handler for HostKeyCheck {
     type Error = anyhow::Error;
+
+    /// A connection to a port the server listens on for one of our `-R` rules.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let known = self.shared.lock().remote.contains_key(&connected_port);
+        if known {
+            reply.accept().await;
+            crate::tunnels::accept_forwarded(&self.shared, &self.ctx, connected_port, channel);
+        } else {
+            reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+        }
+        Ok(())
+    }
 
     async fn check_server_key(&mut self, server_key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let PublicKeyOrCertificate::PublicKey { key, .. } = server_key else {

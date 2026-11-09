@@ -12,7 +12,7 @@ use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle as AnsiCursorStyle};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, Id, Key, Modifiers, PointerButton, Rect,
-    RichText, Sense, Shape, Stroke, StrokeKind, UiBuilder, ViewportCommand, pos2, vec2,
+    RichText, Sense, Stroke, StrokeKind, UiBuilder, ViewportCommand, pos2, vec2,
 };
 use eframe::glow;
 use uuid::Uuid;
@@ -452,7 +452,7 @@ impl HauntApp {
             self.launcher = Some(Launcher { query: String::new(), selected: 0 });
         }
 
-        // Tabs: slanted powerline chips, as in HyDE's kitty tab bar.
+        // Tabs: capsules.
         let tabs_left = bar.min.x + 112.0;
         let area = Rect::from_min_max(pos2(tabs_left, bar.min.y), pos2(controls_left, bar.max.y));
         self.tabs(ui, area);
@@ -464,7 +464,6 @@ impl HauntApp {
         let now = ctx.input(|i| i.time);
         let painter = ui.painter_at(area);
         let h = 30.0;
-        let skew = 9.0;
         let y0 = area.center().y - h / 2.0;
         let mut x = area.min.x;
         let mut activate = None;
@@ -476,8 +475,8 @@ impl HauntApp {
             let born = self.tab_born.get(&s.id).copied().unwrap_or(0.0);
             let grow = anim::wind(anim::since(&ctx, born, 0.45));
             let status = s.status();
-            let galley = painter.layout_no_wrap(s.label.clone(), fonts::ui(13.0), t.text);
-            let full = (galley.size().x + 64.0).min(max_w);
+            let galley = painter.layout_no_wrap(s.label.clone(), fonts::ui(13.0), Color32::PLACEHOLDER);
+            let full = (galley.size().x + 58.0).min(max_w);
             let w = full * grow.clamp(0.0, 1.1);
             if w < 4.0 {
                 x += w;
@@ -490,17 +489,17 @@ impl HauntApp {
             let hov = anim::toggle(&ctx, id.with("h"), resp.hovered(), 0.15);
             let act = anim::toggle(&ctx, id.with("a"), active, 0.25);
 
-            let poly = vec![
-                pos2(rect.min.x + skew, rect.min.y),
-                pos2(rect.max.x, rect.min.y),
-                pos2(rect.max.x - skew, rect.max.y),
-                pos2(rect.min.x, rect.max.y),
-            ];
             let fill = mix(t.surface.gamma_multiply(0.45 + 0.35 * hov), t.accent, act);
             if act > 0.01 {
-                fx::glow(&painter, rect.shrink2(vec2(skew, 2.0)), 10.0, t.accent.gamma_multiply(0.35 * act), 18.0, 0.0);
+                fx::glow(&painter, rect, h / 2.0, t.accent.gamma_multiply(0.35 * act), 18.0, 0.0);
             }
-            painter.add(Shape::convex_polygon(poly, fill, Stroke::NONE));
+            painter.rect(
+                rect,
+                CornerRadius::same(255),
+                fill,
+                Stroke::new(1.0, t.overlay.gamma_multiply(0.6 * (1.0 - act))),
+                StrokeKind::Inside,
+            );
 
             let text_color = mix(mix(t.subtext, t.text, hov), t.crust, act);
             let dot = match status {
@@ -508,16 +507,16 @@ impl HauntApp {
                 Status::Connecting => t.warn,
                 Status::Closed(_) => t.err,
             };
-            let dot_c = pos2(rect.min.x + skew + 12.0, rect.center().y);
+            let dot_c = pos2(rect.min.x + 15.0, rect.center().y);
             let pulse = if matches!(status, Status::Connecting) { 0.5 + 0.5 * (now as f32 * 5.0).sin() } else { 0.0 };
             painter.circle_filled(dot_c, 3.5 + pulse * 2.0, if act > 0.5 { mix(dot, t.crust, 0.35) } else { dot });
-            let text_clip = Rect::from_min_max(pos2(dot_c.x + 9.0, rect.min.y), pos2(rect.max.x - skew - 20.0, rect.max.y));
+            let text_clip = Rect::from_min_max(pos2(dot_c.x + 9.0, rect.min.y), pos2(rect.max.x - 26.0, rect.max.y));
             painter
                 .with_clip_rect(text_clip.intersect(area))
                 .galley(pos2(text_clip.min.x, rect.center().y - galley.size().y / 2.0), galley, text_color);
 
             // Close button appears on hover / active.
-            let xr = Rect::from_center_size(pos2(rect.max.x - skew - 10.0, rect.center().y), vec2(18.0, 18.0));
+            let xr = Rect::from_center_size(pos2(rect.max.x - 15.0, rect.center().y), vec2(18.0, 18.0));
             let xresp = ui.interact(xr, id.with("x"), Sense::click());
             let show_x = hov.max(act * 0.6);
             if show_x > 0.02 {
@@ -534,21 +533,15 @@ impl HauntApp {
             let title = s.shared.lock().title.clone();
             let tip = format!("{}@{}:{}{}", s.spec.user, s.spec.host, s.spec.port, title.map(|t| format!("\n{t}")).unwrap_or_default());
             resp.on_hover_text(tip);
-            x += w + 4.0 - skew * 0.4;
+            x += w + 6.0;
         }
 
         // "+" opens the launcher.
-        let plus = Rect::from_min_size(pos2(x + 4.0, y0), vec2(34.0, h));
+        let plus = Rect::from_min_size(pos2(x, y0), vec2(h, h));
         if plus.max.x <= area.max.x {
             let resp = ui.interact(plus, Id::unique("tab-plus"), Sense::click());
             let hov = anim::toggle(&ctx, resp.id, resp.hovered(), 0.15);
-            let poly = vec![
-                pos2(plus.min.x + skew, plus.min.y),
-                pos2(plus.max.x, plus.min.y),
-                pos2(plus.max.x - skew, plus.max.y),
-                pos2(plus.min.x, plus.max.y),
-            ];
-            painter.add(Shape::convex_polygon(poly, t.surface.gamma_multiply(0.25 + 0.5 * hov), Stroke::NONE));
+            painter.rect_filled(plus, CornerRadius::same(255), t.surface.gamma_multiply(0.25 + 0.5 * hov));
             painter.text(plus.center(), Align2::CENTER_CENTER, icon::PLUS, fonts::mono(12.0), mix(t.subtext, t.accent, hov));
             if resp.on_hover_text("New connection  (Ctrl+K)").on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 self.launcher = Some(Launcher { query: String::new(), selected: 0 });
@@ -934,7 +927,6 @@ impl HauntApp {
             widgets::field(ui, t, "Name", &mut ed.server.name, "My server", false);
             ui.add_space(6.0);
             ui.columns(2, |cols| {
-                cols[0].set_max_width(9999.0);
                 widgets::field(&mut cols[0], t, "Host", &mut ed.server.host, "example.com", false);
                 widgets::field(&mut cols[1], t, "Port", &mut ed.port, "22", false);
             });
@@ -1448,6 +1440,15 @@ impl eframe::App for HauntApp {
         self.settings_dialog(&ctx);
         self.launcher_dialog(&ctx);
         self.draw_toasts(&ctx);
+
+        // When a dialog closes (Esc, click outside) or focus ends up nowhere, hand the
+        // keyboard back to the terminal so keys don't silently go nowhere.
+        if !self.modal_open() && ctx.memory(|m| m.focused().is_none()) {
+            if let Some(s) = self.sessions.get_mut(self.active) {
+                s.want_focus = true;
+                ctx.request_repaint();
+            }
+        }
     }
 }
 

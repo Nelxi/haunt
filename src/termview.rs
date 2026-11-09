@@ -319,7 +319,8 @@ fn key_bytes(key: Key, m: Modifiers, mode: TermMode) -> Option<Vec<u8>> {
         }
         Key::Backspace => {
             if m.ctrl {
-                vec![0x08]
+                // Erase the previous word (unix-word-rubout), like Windows Terminal/kitty users expect.
+                vec![0x17]
             } else if m.alt {
                 b"\x1b\x7f".to_vec()
             } else {
@@ -337,6 +338,7 @@ fn key_bytes(key: Key, m: Modifiers, mode: TermMode) -> Option<Vec<u8>> {
         Key::Home => cursor_key('H'),
         Key::End => cursor_key('F'),
         Key::Insert => tilde(2),
+        Key::Delete if m.ctrl && !m.alt && !m.shift => b"\x1bd".to_vec(), // kill-word forward
         Key::Delete => tilde(3),
         Key::PageUp => tilde(5),
         Key::PageDown => tilde(6),

@@ -2,7 +2,7 @@
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, Frame, Id, LayerId, Margin, Order, Rect,
-    Response, Sense, Stroke, StrokeKind, TextEdit, Ui, emath::TSTransform, pos2, vec2,
+    Response, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, emath::TSTransform, pos2, vec2,
 };
 
 use crate::anim;
@@ -156,26 +156,34 @@ pub fn input(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, password: b
     let (rect, _) = ui.allocate_exact_size(vec2(w, 36.0), Sense::hover());
     let left = if icon.is_empty() { 12.0 } else { 34.0 };
     let inner = Rect::from_min_max(pos2(rect.min.x + left, rect.min.y), pos2(rect.max.x - 10.0, rect.max.y));
+    // Reserve slots so the box is painted *under* the text, filled in once we know the focus state.
+    let glow_slot = ui.painter().add(Shape::Noop);
+    let box_slot = ui.painter().add(Shape::Noop);
     let edit = TextEdit::singleline(value)
         .hint_text(egui::RichText::new(hint).color(t.subtext.gamma_multiply(0.7)))
         .password(password)
+        .font(fonts::ui(13.5))
         .frame(Frame::NONE)
-        .margin(Margin::symmetric(0, 9))
+        .margin(Margin::ZERO)
+        .align(Align2::LEFT_CENTER)
+        .min_size(inner.size())
         .desired_width(inner.width());
     let resp = ui.put(inner, edit);
     let f = anim::toggle(ui.ctx(), resp.id.with("focus"), resp.has_focus(), 0.18);
     let p = ui.painter();
-    // Painted under the text by inserting at layer bottom is not possible here, so use
-    // a translucent fill that keeps the text readable.
-    p.rect(
-        rect,
-        CornerRadius::same(10),
-        t.crust.gamma_multiply(0.55),
-        Stroke::new(1.0 + f * 0.5, mix(t.overlay.gamma_multiply(0.8), t.accent, f)),
-        StrokeKind::Inside,
+    p.set(
+        box_slot,
+        egui::epaint::RectShape::new(
+            rect,
+            CornerRadius::same(10),
+            t.crust.gamma_multiply(0.7),
+            Stroke::new(1.0 + f * 0.5, mix(t.overlay.gamma_multiply(0.8), t.accent, f)),
+            StrokeKind::Inside,
+        ),
     );
     if f > 0.0 {
-        fx::glow(p, rect, 10.0, t.accent.gamma_multiply(0.12 * f), 12.0, 0.0);
+        let glow = egui::epaint::Shadow { offset: [0, 0], blur: 12, spread: 0, color: t.accent.gamma_multiply(0.12 * f) };
+        p.set(glow_slot, glow.as_shape(rect, CornerRadius::same(10)));
     }
     if !icon.is_empty() {
         p.text(pos2(rect.min.x + 17.0, rect.center().y), Align2::CENTER_CENTER, icon, fonts::mono(12.5), mix(t.subtext, t.accent, f));

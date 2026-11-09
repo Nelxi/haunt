@@ -1746,6 +1746,7 @@ dependencies = [
  "log",
  "parking_lot 0.13.0",
  "raw-window-handle",
+ "regex",
  "rfd",
  "russh",
  "serde",

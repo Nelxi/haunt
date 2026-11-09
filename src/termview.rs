@@ -22,6 +22,7 @@ use crate::fonts;
 use crate::fx;
 use crate::session::{GridSize, Session, Status};
 use crate::theme::{Theme, mix};
+use crate::veil;
 
 /// Per-tab view state that survives between frames.
 pub struct ViewState {
@@ -633,6 +634,10 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
     let mut bg_rects: Vec<(usize, usize, usize, Color32)> = Vec::new(); // row, col, width, color
     let mut lines: Vec<(Rect, Color32)> = Vec::new();
     let mut runs: Vec<TextRun> = Vec::new();
+    // Streamer mode keeps a plain copy of the screen to search for secrets.
+    let veil_on = veil::enabled();
+    let mut cells: Vec<(char, Color32, Face)> =
+        if veil_on { vec![(' ', theme.fg, Face::Regular); m.rows * m.cols] } else { Vec::new() };
 
     for item in content.display_iter {
         let cell = item.cell;
@@ -653,10 +658,14 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
 
         let mut fg_color = cell.fg;
         if set.bold_is_bright && flags.contains(Flags::BOLD) {
-            if let AnsiColor::Named(n) = fg_color {
-                if (n as usize) < 8 {
+            match fg_color {
+                AnsiColor::Named(n) if (n as usize) < 8 => {
                     fg_color = AnsiColor::Indexed(n as u8 + 8);
                 }
+                AnsiColor::Indexed(i) if i < 8 => {
+                    fg_color = AnsiColor::Indexed(i + 8);
+                }
+                _ => {}
             }
         }
         let mut fg = resolve(fg_color, colors, look);
@@ -703,6 +712,9 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
         } else {
             Face::Regular
         };
+        if veil_on {
+            cells[row * m.cols + col] = (c, fg, face);
+        }
         let ascii = c.is_ascii() && width == 1;
         match runs.last_mut() {
             Some(run)
@@ -826,16 +838,33 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
         }
     }
 
+    let face_font = |f: Face| match f {
+        Face::Regular => &m.font,
+        Face::Bold => &m.font_bold,
+        Face::Italic => &m.font_italic,
+    };
+    let masked = if veil_on { veil_screen(painter, theme, m, &cells, &face_font) } else { Vec::new() };
+    let is_masked = |row: usize, col: usize| masked.get(row * m.cols + col).copied().unwrap_or(false);
+
     for run in &runs {
         let r = m.cell_rect(run.col, run.row, 1);
-        let font = match run.face {
-            Face::Regular => &m.font,
-            Face::Bold => &m.font_bold,
-            Face::Italic => &m.font_italic,
+        let font = face_font(run.face);
+        let text: std::borrow::Cow<'_, str> = if masked.is_empty() {
+            run.text.as_str().into()
+        } else if run.ascii {
+            run.text.chars().enumerate().map(|(i, c)| if is_masked(run.row, run.col + i) { ' ' } else { c }).collect::<String>().into()
+        } else if is_masked(run.row, run.col) {
+            continue;
+        } else {
+            run.text.as_str().into()
         };
-        painter.text(r.min + vec2(0.0, m.text_dy), Align2::LEFT_TOP, &run.text, font.clone(), run.color);
+        painter.text(r.min + vec2(0.0, m.text_dy), Align2::LEFT_TOP, text, font.clone(), run.color);
     }
     // Glyph under a block cursor, in the background color.
+    let cursor_glyph = cursor_glyph.filter(|_| {
+        let row = cursor.point.line.0 + offset;
+        row < 0 || !is_masked(row as usize, cursor.point.column.0)
+    });
     if let Some((r, color)) = cursor_glyph {
         let ch = term.grid()[cursor.point].c;
         if ch != ' ' && ch != '\0' {
@@ -863,6 +892,56 @@ fn draw(ui: &egui::Ui, painter: &egui::Painter, s: &mut Session, look: &Look<'_>
             theme.accent.gamma_multiply(0.7),
         );
     }
+}
+
+/// Finds secrets on the visible screen, paints their masks and queues the real text for the
+/// overlay. Returns which cells are masked (row-major).
+fn veil_screen<'f>(
+    painter: &egui::Painter,
+    theme: &Theme,
+    m: &Metrics,
+    cells: &[(char, Color32, Face)],
+    face_font: &dyn Fn(Face) -> &'f FontId,
+) -> Vec<bool> {
+    let mut masked = vec![false; cells.len()];
+    let chip = mix(theme.bg, theme.overlay, 0.45);
+    let mut text = String::with_capacity(m.cols);
+    let mut col_at: Vec<usize> = Vec::with_capacity(m.cols + 1);
+    for row in 0..m.rows {
+        let line = &cells[row * m.cols..(row + 1) * m.cols];
+        if line.iter().all(|c| c.0 == ' ') {
+            continue;
+        }
+        text.clear();
+        col_at.clear();
+        for (c, _, _) in line {
+            col_at.push(text.len());
+            text.push(*c);
+        }
+        col_at.push(text.len());
+        for r in veil::find(&text) {
+            let c0 = col_at.partition_point(|&b| b < r.start);
+            let c1 = col_at.partition_point(|&b| b < r.end).min(m.cols);
+            if c1 <= c0 {
+                continue;
+            }
+            masked[row * m.cols + c0..row * m.cols + c1].fill(true);
+            let mut texts = Vec::new();
+            let mut seg = c0;
+            for c in c0 + 1..=c1 {
+                if c == c1 || line[c].1 != line[seg].1 || line[c].2 != line[seg].2 {
+                    let s: String = line[seg..c].iter().map(|x| x.0).collect();
+                    if !s.trim().is_empty() {
+                        let g = painter.layout_no_wrap(s, face_font(line[seg].2).clone(), Color32::PLACEHOLDER);
+                        texts.push((m.cell_rect(seg, row, 1).min + vec2(0.0, m.text_dy), g, line[seg].1));
+                    }
+                    seg = c;
+                }
+            }
+            veil::cover(painter, m.cell_rect(c0, row, c1 - c0).expand2(vec2(1.5, 0.0)), chip, 3.0, texts);
+        }
+    }
+    masked
 }
 
 fn draw_status(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, theme: &Theme, status: &Status, id: egui::Id) {
@@ -894,3 +973,207 @@ fn draw_status(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, theme: &Theme
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::term::Config as TermConfig;
+    use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
+    use crate::theme;
+
+    struct Dummy;
+    impl alacritty_terminal::event::EventListener for Dummy {
+        fn send_event(&self, _: alacritty_terminal::event::Event) {}
+    }
+
+    fn dummy_look<'a>(th: &'a Theme, pal: &'a [Color32; 256], set: &'a Settings) -> Look<'a> {
+        Look {
+            theme: th,
+            palette: pal,
+            settings: set,
+            time: 0.0,
+            window_focused: true,
+            pane_alpha: 1.0,
+        }
+    }
+
+    #[test]
+    fn test_resolve_named_and_spec_colors() {
+        let th = theme::by_name("Catppuccin Mocha");
+        let pal = th.palette256();
+        let set = Settings::default();
+        let look = dummy_look(th, &pal, &set);
+
+        let size = GridSize { cols: 80, rows: 24 };
+        let term = alacritty_terminal::term::Term::new(TermConfig::default(), &size, Dummy);
+        let content = term.renderable_content();
+        let colors = content.colors;
+
+        // Named 0..15 match palette 0..15
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Black), colors, &look), pal[0]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Red), colors, &look), pal[1]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Green), colors, &look), pal[2]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Yellow), colors, &look), pal[3]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Blue), colors, &look), pal[4]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Magenta), colors, &look), pal[5]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Cyan), colors, &look), pal[6]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::White), colors, &look), pal[7]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::BrightBlack), colors, &look), pal[8]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::BrightRed), colors, &look), pal[9]);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::BrightWhite), colors, &look), pal[15]);
+
+        // Special named colors
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Foreground), colors, &look), th.fg);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::BrightForeground), colors, &look), th.fg);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Background), colors, &look), th.bg);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::Cursor), colors, &look), th.cursor);
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::DimForeground), colors, &look), mix(th.fg, th.bg, 0.35));
+
+        // Dim colors
+        assert_eq!(resolve(AnsiColor::Named(NamedColor::DimRed), colors, &look), mix(pal[1], th.bg, 0.35));
+
+        // Spec truecolor
+        let rgb = Rgb { r: 123, g: 210, b: 45 };
+        assert_eq!(resolve(AnsiColor::Spec(rgb), colors, &look), Color32::from_rgb(123, 210, 45));
+    }
+
+    #[test]
+    fn test_resolve_all_256_indexed_colors() {
+        let th = theme::by_name("Catppuccin Mocha");
+        let pal = th.palette256();
+        let set = Settings::default();
+        let look = dummy_look(th, &pal, &set);
+
+        let size = GridSize { cols: 80, rows: 24 };
+        let term = alacritty_terminal::term::Term::new(TermConfig::default(), &size, Dummy);
+        let content = term.renderable_content();
+        let colors = content.colors;
+
+        for i in 0..=255u8 {
+            assert_eq!(
+                resolve(AnsiColor::Indexed(i), colors, &look),
+                pal[i as usize],
+                "index {i} should resolve to palette[{i}]"
+            );
+        }
+    }
+
+    #[test]
+    fn test_osc4_color_override_takes_precedence() {
+        let th = theme::by_name("Catppuccin Mocha");
+        let pal = th.palette256();
+        let set = Settings::default();
+        let look = dummy_look(th, &pal, &set);
+
+        let size = GridSize { cols: 80, rows: 24 };
+        let mut term = alacritty_terminal::term::Term::new(TermConfig::default(), &size, Dummy);
+        let mut parser = alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+
+        // OSC 4 ; 1 ; rgb:aa/bb/cc \x07 (override color 1)
+        parser.advance(&mut term, b"\x1b]4;1;rgb:aa/bb/cc\x07");
+
+        let content = term.renderable_content();
+        let colors = content.colors;
+
+        let resolved_named = resolve(AnsiColor::Named(NamedColor::Red), colors, &look);
+        let resolved_indexed = resolve(AnsiColor::Indexed(1), colors, &look);
+        let expected = Color32::from_rgb(0xaa, 0xbb, 0xcc);
+
+        assert_eq!(resolved_named, expected, "OSC 4 should override Named Red");
+        assert_eq!(resolved_indexed, expected, "OSC 4 should override Indexed 1");
+    }
+
+    #[test]
+    fn test_bold_is_bright_promotion_logic() {
+        let promote = |fg_color: AnsiColor| -> AnsiColor {
+            let mut c = fg_color;
+            match c {
+                AnsiColor::Named(n) if (n as usize) < 8 => {
+                    c = AnsiColor::Indexed(n as u8 + 8);
+                }
+                AnsiColor::Indexed(i) if i < 8 => {
+                    c = AnsiColor::Indexed(i + 8);
+                }
+                _ => {}
+            }
+            c
+        };
+
+        // Named 0..7 become Indexed 8..15
+        assert_eq!(promote(AnsiColor::Named(NamedColor::Black)), AnsiColor::Indexed(8));
+        assert_eq!(promote(AnsiColor::Named(NamedColor::Red)), AnsiColor::Indexed(9));
+        assert_eq!(promote(AnsiColor::Named(NamedColor::White)), AnsiColor::Indexed(15));
+
+        // Indexed 0..7 become Indexed 8..15
+        assert_eq!(promote(AnsiColor::Indexed(0)), AnsiColor::Indexed(8));
+        assert_eq!(promote(AnsiColor::Indexed(3)), AnsiColor::Indexed(11));
+        assert_eq!(promote(AnsiColor::Indexed(7)), AnsiColor::Indexed(15));
+
+        // Already bright or standard 16..255 or foreground do not change
+        assert_eq!(promote(AnsiColor::Named(NamedColor::BrightRed)), AnsiColor::Named(NamedColor::BrightRed));
+        assert_eq!(promote(AnsiColor::Indexed(8)), AnsiColor::Indexed(8));
+        assert_eq!(promote(AnsiColor::Indexed(196)), AnsiColor::Indexed(196));
+        assert_eq!(promote(AnsiColor::Named(NamedColor::Foreground)), AnsiColor::Named(NamedColor::Foreground));
+    }
+
+    #[test]
+    fn test_veil_screen_masking_logic() {
+        let th = theme::by_name("Catppuccin Mocha");
+        veil::begin_frame(true, ["secret.corp.internal".to_string()]);
+
+        let cols = 35;
+        let rows = 2;
+        let line0 = "Host: secret.corp.internal ready   ";
+        let line1 = "Connecting to 10.20.30.40 now      ";
+
+        let mut cells = Vec::new();
+        for c in line0.chars() {
+            cells.push((c, th.fg, Face::Regular));
+        }
+        for c in line1.chars() {
+            cells.push((c, th.fg, Face::Regular));
+        }
+
+        // Mock egui painter via Context
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |_| {});
+        output.textures_delta.clear();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let font = FontId::monospace(13.0);
+        let m = Metrics {
+            font: font.clone(),
+            font_bold: font.clone(),
+            font_italic: font.clone(),
+            cw: 8.0,
+            ch: 16.0,
+            text_dy: 0.0,
+            origin: Pos2::ZERO,
+            cols,
+            rows,
+        };
+
+        let masked = veil_screen(&painter, th, &m, &cells, &|_| &font);
+        assert_eq!(masked.len(), cols * rows);
+
+        // Row 0: "Host: secret.corp.internal ready   "
+        // "secret.corp.internal" is cols 6..26
+        assert!(!masked[0], "col 0 ('H') should not be masked");
+        assert!(!masked[5], "col 5 (' ') should not be masked");
+        for c in 6..26 {
+            assert!(masked[c], "col {c} in 'secret.corp.internal' should be masked");
+        }
+        assert!(!masked[26], "col 26 (' ') should not be masked");
+
+        // Row 1: "Connecting to 10.20.30.40 now      "
+        // "10.20.30.40" is cols 14..25
+        let r1 = cols;
+        assert!(!masked[r1 + 0], "row 1 col 0 should not be masked");
+        assert!(!masked[r1 + 13], "row 1 col 13 should not be masked");
+        for c in 14..25 {
+            assert!(masked[r1 + c], "row 1 col {c} in '10.20.30.40' should be masked");
+        }
+        assert!(!masked[r1 + 25], "row 1 col 25 should not be masked");
+    }
+}
+
+

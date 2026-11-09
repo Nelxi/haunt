@@ -94,12 +94,15 @@ pub struct Settings {
     pub cursor_trail: bool,
     /// Master switch for UI animations.
     pub animations: bool,
+    /// Streamer mode: IPs, hosts, emails and tokens are hidden from screen capture
+    /// (OBS, ShareX, Discord) but stay visible on your own screen.
+    pub streamer_mode: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: "Graphite Mono".into(),
+            theme: "Catppuccin Mocha".into(),
             font_size: 13.5,
             line_height: 1.2,
             scrollback: 10_000,
@@ -120,6 +123,7 @@ impl Default for Settings {
             border_animation: true,
             cursor_trail: true,
             animations: true,
+            streamer_mode: true,
         }
     }
 }

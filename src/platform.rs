@@ -107,3 +107,41 @@ fn hwnd(window: &impl HasWindowHandle) -> Option<windows_sys::Win32::Foundation:
         _ => None,
     }
 }
+
+/// Exclude a window with the specified title from screen capture (OBS, Discord, ShareX).
+#[allow(dead_code)]
+pub fn exclude_from_capture_by_title(title: &str) -> bool {
+    setup_overlay_window(title, Option::<&eframe::Frame>::None)
+}
+
+/// Sets capture exclusion on the overlay window and binds it to the main window as owner
+/// so it follows the main window's z-order, stays hidden when minimized, and is never captured.
+pub fn setup_overlay_window(overlay_title: &str, main_window: Option<&impl HasWindowHandle>) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, GWLP_HWNDPARENT, SetWindowDisplayAffinity, SetWindowLongPtrW,
+            WDA_EXCLUDEFROMCAPTURE,
+        };
+        let wide: Vec<u16> = overlay_title.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: FindWindowW called with valid null-terminated wide string.
+        unsafe {
+            let overlay_hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+            if !overlay_hwnd.is_null() {
+                SetWindowDisplayAffinity(overlay_hwnd, WDA_EXCLUDEFROMCAPTURE);
+                if let Some(main) = main_window {
+                    if let Some(main_hwnd) = hwnd(main) {
+                        SetWindowLongPtrW(overlay_hwnd, GWLP_HWNDPARENT, main_hwnd as isize);
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (overlay_title, main_window);
+    }
+    false
+}
+

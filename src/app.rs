@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::config::{Auth, Config, CursorStyle, Server};
 use crate::import;
+use crate::veil;
 use crate::fonts::icon;
 use crate::session::{ConnectSpec, PromptKind, Session, Status};
 use crate::shader::{self, Aurora, AuroraParams};
@@ -352,7 +353,7 @@ impl HauntApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump) = ctx.input_mut(|i| {
+        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump, streamer) = ctx.input_mut(|i| {
             let jump = digits.iter().position(|k| i.consume_key(Modifiers::CTRL, *k));
             (
                 i.consume_key(Modifiers::CTRL, Key::Tab),
@@ -364,6 +365,7 @@ impl HauntApp {
                 i.consume_key(Modifiers::CTRL, Key::K) || i.consume_key(cs, Key::P),
                 i.consume_key(Modifiers::CTRL, Key::B),
                 jump,
+                i.consume_key(cs, Key::S),
             )
         });
         let n = self.sessions.len();
@@ -396,6 +398,19 @@ impl HauntApp {
         }
         if launcher {
             self.launcher = Some(Launcher { query: String::new(), selected: 0 });
+        }
+        if streamer {
+            self.cfg.settings.streamer_mode = !self.cfg.settings.streamer_mode;
+            self.notify(
+                ctx,
+                if self.cfg.settings.streamer_mode {
+                    "Streamer mode enabled"
+                } else {
+                    "Streamer mode disabled"
+                },
+                false,
+            );
+            self.save(ctx);
         }
     }
 
@@ -565,9 +580,15 @@ impl HauntApp {
             let pulse = if matches!(status, Status::Connecting) { 0.5 + 0.5 * (now as f32 * 5.0).sin() } else { 0.0 };
             painter.circle_filled(dot_c, 3.5 + pulse * 2.0, if act > 0.5 { mix(dot, t.crust, 0.35) } else { dot });
             let text_clip = Rect::from_min_max(pos2(dot_c.x + 9.0, rect.min.y), pos2(rect.max.x - 26.0, rect.max.y));
-            painter
-                .with_clip_rect(text_clip.intersect(area))
-                .galley(pos2(text_clip.min.x, rect.center().y - galley.size().y / 2.0), galley, text_color);
+            veil::text_auto(
+                &painter.with_clip_rect(text_clip.intersect(area)),
+                pos2(text_clip.min.x, rect.center().y),
+                Align2::LEFT_CENTER,
+                &s.label,
+                fonts::ui(13.0),
+                text_color,
+                mix(t.surface, t.accent, act),
+            );
 
             // Close button appears on hover / active.
             let xr = Rect::from_center_size(pos2(rect.max.x - 15.0, rect.center().y), vec2(18.0, 18.0));
@@ -856,8 +877,8 @@ impl HauntApp {
                 }
                 let tx = r.min.x + 56.0;
                 let clip = cp.with_clip_rect(Rect::from_min_max(pos2(tx, r.min.y), pos2(r.max.x - 10.0, r.max.y)));
-                clip.text(pos2(tx, r.center().y - 9.0), Align2::LEFT_CENTER, s.display_name(), fonts::bold(13.5), t.text);
-                clip.text(pos2(tx, r.center().y + 10.0), Align2::LEFT_CENTER, format!("{}@{}", s.user, s.host), fonts::ui(11.5), t.subtext);
+                veil::text_auto(&clip, pos2(tx, r.center().y - 9.0), Align2::LEFT_CENTER, s.display_name(), fonts::bold(13.5), t.text, mix(t.surface, t.mantle, 0.5));
+                veil::text(&clip, pos2(tx, r.center().y + 10.0), Align2::LEFT_CENTER, format!("{}@{}", s.user, s.host), fonts::ui(11.5), t.subtext, mix(t.mantle, t.surface, 0.5));
                 if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                     connect = Some(s.clone());
                 }
@@ -934,7 +955,7 @@ impl HauntApp {
                         .inner_margin(12)
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.label(RichText::new(&message).font(fonts::mono(12.0)).color(t.subtext));
+                            veiled_label(ui, &message, fonts::mono(12.0), t.subtext, t.crust);
                         });
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
@@ -947,7 +968,7 @@ impl HauntApp {
                     });
                 }
                 PromptKind::Password | PromptKind::Passphrase => {
-                    ui.label(RichText::new(&message).color(t.subtext));
+                    veiled_label(ui, &message, fonts::ui(13.0), t.subtext, t.mantle);
                     ui.add_space(10.0);
                     let enter = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
                     let edit = widgets::input(ui, t, &mut self.prompt_input, "••••••••", true, icon::LOCK);
@@ -1000,7 +1021,7 @@ impl HauntApp {
             widgets::field(ui, t, "Name", &mut ed.server.name, "My server", false);
             ui.add_space(6.0);
             ui.columns(2, |cols| {
-                widgets::field(&mut cols[0], t, "Host", &mut ed.server.host, "example.com", false);
+                widgets::veiled_field(&mut cols[0], t, "Host", &mut ed.server.host, "example.com");
                 widgets::field(&mut cols[1], t, "Port", &mut ed.port, "22", false);
             });
             ui.add_space(6.0);
@@ -1178,11 +1199,13 @@ impl HauntApp {
                 let gap = 10.0;
                 let cw = (w - gap * (cols as f32 - 1.0)) / cols as f32;
                 let themes = theme::all();
+                let current_theme = theme::by_name(&self.cfg.settings.theme);
                 for chunk in themes.chunks(cols) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
                         for th in chunk {
-                            if theme_card(ui, th, th.name == self.cfg.settings.theme, vec2(cw, 82.0)).clicked() {
+                            let selected = std::ptr::eq(th, current_theme);
+                            if theme_card(ui, th, selected, vec2(cw, 82.0)).clicked() {
                                 self.cfg.settings.theme = th.name.to_string();
                             }
                         }
@@ -1197,6 +1220,7 @@ impl HauntApp {
                 widgets::toggle(ui, t, &mut s.animated_background, "Aurora background", "GLSL shader wallpaper");
                 widgets::toggle(ui, t, &mut s.border_animation, "Animated border", "Rotating gradient around the active pane");
                 widgets::toggle(ui, t, &mut s.animations, "Animations", "Turn off for a static, minimal UI");
+                widgets::toggle(ui, t, &mut s.streamer_mode, "Streamer mode", "Mask IPs, hosts and tokens from screen capture (OBS, Discord)");
 
                 widgets::section(ui, t, icon::TERMINAL, "Terminal");
                 slider(ui, t, "Font size", &mut s.font_size, 9.0..=28.0, 0.5, "pt");
@@ -1337,8 +1361,8 @@ impl HauntApp {
                     };
                     let active = k == l.selected;
                     p.text(pos2(row.min.x + 22.0, row.center().y), Align2::CENTER_CENTER, ic, fonts::mono(14.0), color);
-                    p.text(pos2(row.min.x + 44.0, row.center().y - 8.0), Align2::LEFT_CENTER, title, fonts::bold(13.5), if active { t.text } else { mix(t.text, t.subtext, 0.3) });
-                    p.text(pos2(row.min.x + 44.0, row.center().y + 10.0), Align2::LEFT_CENTER, sub, fonts::ui(11.5), t.subtext);
+                    veil::text_auto(&p, pos2(row.min.x + 44.0, row.center().y - 8.0), Align2::LEFT_CENTER, &title, fonts::bold(13.5), if active { t.text } else { mix(t.text, t.subtext, 0.3) }, t.surface);
+                    veil::text_auto(&p, pos2(row.min.x + 44.0, row.center().y + 10.0), Align2::LEFT_CENTER, &sub, fonts::ui(11.5), t.subtext, t.surface);
                     if active {
                         p.text(pos2(row.max.x - 14.0, row.center().y), Align2::RIGHT_CENTER, "↵", fonts::ui(14.0), t.subtext);
                     }
@@ -1393,7 +1417,12 @@ impl HauntApp {
             let inn = anim::wind((age / 0.45).clamp(0.0, 1.0));
             let out = anim::smooth(((LIFE as f32 - age) / 0.4).clamp(0.0, 1.0));
             let color = if toast.error { t.err } else { t.ok };
-            let galley = painter.layout(toast.text.clone(), fonts::ui(13.0), t.text, 360.0);
+            let sensitive = veil::enabled() && !veil::find(&toast.text).is_empty();
+            let galley = if sensitive {
+                painter.layout_no_wrap(toast.text.clone(), fonts::ui(13.0), t.text)
+            } else {
+                painter.layout(toast.text.clone(), fonts::ui(13.0), t.text, 360.0)
+            };
             let size = galley.size() + vec2(48.0, 24.0);
             let x = screen.max.x - 20.0 - size.x + (1.0 - inn) * (size.x + 30.0);
             let r = Rect::from_min_size(pos2(x, y - size.y), size);
@@ -1403,10 +1432,64 @@ impl HauntApp {
             p.rect(r, CornerRadius::same(12), t.mantle, Stroke::new(1.0, color.gamma_multiply(0.7)), StrokeKind::Inside);
             p.rect_filled(Rect::from_min_size(r.min + vec2(0.0, 10.0), vec2(3.0, r.height() - 20.0)), 2.0, color);
             p.text(pos2(r.min.x + 20.0, r.center().y), Align2::CENTER_CENTER, if toast.error { icon::XMARK } else { icon::BOLT }, fonts::mono(12.0), color);
-            p.galley(r.min + vec2(36.0, 12.0), galley, t.text);
+            if sensitive {
+                veil::text_auto(&p, r.min + vec2(36.0, 12.0), Align2::LEFT_TOP, &toast.text, fonts::ui(13.0), t.text, t.surface);
+            } else {
+                p.galley(r.min + vec2(36.0, 12.0), galley, t.text);
+            }
             y -= size.y * out.max(0.2) + 10.0;
         }
         ctx.request_repaint_after(Duration::from_millis(16));
+    }
+
+    fn veil_overlay(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let secrets = veil::take();
+        if !self.cfg.settings.streamer_mode {
+            return;
+        }
+
+        let is_minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        if is_minimized {
+            return;
+        }
+
+        let win_rect = ctx.input(|i| i.viewport().inner_rect.or(i.viewport().outer_rect));
+        let Some(rect) = win_rect else { return };
+        if rect.width() < 10.0 || rect.height() < 10.0 {
+            return;
+        }
+
+        let builder = egui::ViewportBuilder::default()
+            .with_title("haunt-veil-overlay")
+            .with_app_id("haunt-veil-overlay")
+            .with_transparent(true)
+            .with_decorations(false)
+            .with_active(false)
+            .with_mouse_passthrough(true)
+            .with_taskbar(false)
+            .with_position(rect.min)
+            .with_inner_size(rect.size());
+
+        let modal = self.modal_open();
+        let overlay_id = egui::ViewportId::from_hash_of("haunt-veil-overlay");
+        ctx.show_viewport_immediate(
+            overlay_id,
+            builder,
+            |ui, _class| {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(rect.min));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(rect.size()));
+                #[cfg(windows)]
+                platform::setup_overlay_window("haunt-veil-overlay", Some(frame));
+
+                let painter = ui.painter();
+                for s in &secrets {
+                    if modal && !s.top {
+                        continue;
+                    }
+                    veil::paint_real(painter, s);
+                }
+            },
+        );
     }
 }
 
@@ -1429,6 +1512,14 @@ impl eframe::App for HauntApp {
             log::debug!("startup: first frame begins");
         }
         self.apply_style(&ctx);
+        veil::begin_frame(
+            self.cfg.settings.streamer_mode,
+            self.cfg
+                .servers
+                .iter()
+                .flat_map(|s| [s.host.clone(), s.name.clone()])
+                .chain(self.sessions.iter().map(|s| s.spec.host.clone())),
+        );
 
         if self.blur_wanted != self.cfg.settings.blur {
             self.blur_wanted = self.cfg.settings.blur;
@@ -1534,12 +1625,14 @@ impl eframe::App for HauntApp {
             self.resize_handles(ui, win);
         }
 
+        veil::set_top(true);
         self.prompt_dialog(&ctx);
         self.editor_dialog(&ctx);
         self.delete_dialog(&ctx);
         self.settings_dialog(&ctx);
         self.launcher_dialog(&ctx);
         self.draw_toasts(&ctx);
+        self.veil_overlay(&ctx, frame);
         if self.started == Some(now) {
             log::debug!("startup: first frame built");
         }
@@ -1557,13 +1650,27 @@ impl eframe::App for HauntApp {
 
 // ---------------------------------------------------------------- helpers
 
+/// Multi-line label whose IPs / hosts are hidden from screen capture in streamer mode.
+fn veiled_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32, fill: Color32) {
+    let row_h = ui.fonts_mut(|f| f.row_height(&font)) + 2.0;
+    for line in text.lines() {
+        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+        if !line.is_empty() {
+            veil::text_auto(ui.painter(), r.left_center(), Align2::LEFT_CENTER, line, font.clone(), color, fill);
+        }
+    }
+}
+
 fn dialog_header(ui: &mut egui::Ui, t: &Theme, ic: &str, title: &str) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
         ui.painter().rect_filled(r, 10.0, t.accent.gamma_multiply(0.16));
         ui.painter().text(r.center(), Align2::CENTER_CENTER, ic, fonts::mono(15.0), t.accent);
         ui.add_space(4.0);
-        ui.label(RichText::new(title).font(fonts::display(19.0)).color(t.text));
+        let font = fonts::display(19.0);
+        let galley = ui.painter().layout_no_wrap(title.to_string(), font.clone(), Color32::PLACEHOLDER);
+        let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        veil::text_auto(ui.painter(), rect.left_top(), Align2::LEFT_TOP, title, font, t.text, t.mantle);
     });
     ui.add_space(12.0);
 }
@@ -1687,9 +1794,9 @@ fn server_row(ui: &mut egui::Ui, t: &Theme, s: &Server, st: Option<&Status>, app
     let actions_w = 60.0 * h;
     let clip = Rect::from_min_max(pos2(tx, rect.min.y), pos2(rect.max.x - 8.0 - actions_w, rect.max.y));
     let tp = p.with_clip_rect(clip.intersect(p.clip_rect()));
-    tp.text(pos2(tx, rect.center().y - 8.5), Align2::LEFT_CENTER, s.display_name(), fonts::bold(13.5), t.text);
+    veil::text_auto(&tp, pos2(tx, rect.center().y - 8.5), Align2::LEFT_CENTER, s.display_name(), fonts::bold(13.5), t.text, mix(t.mantle, t.surface, 0.5));
     let sub = if s.port == 22 { format!("{}@{}", s.user, s.host) } else { format!("{}@{}:{}", s.user, s.host, s.port) };
-    tp.text(pos2(tx, rect.center().y + 9.5), Align2::LEFT_CENTER, sub, fonts::ui(11.5), t.subtext);
+    veil::text(&tp, pos2(tx, rect.center().y + 9.5), Align2::LEFT_CENTER, sub, fonts::ui(11.5), t.subtext, mix(t.mantle, t.surface, 0.5));
 
     let mut action = None;
     if h > 0.05 {

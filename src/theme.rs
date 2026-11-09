@@ -69,6 +69,28 @@ pub fn all() -> &'static [Theme] {
             Theme {
                 name: "Graphite Mono",
                 ansi: ansi![
+                    0x262626, 0xef6b7b, 0xa8cc8c, 0xdbab79, 0x71beeb, 0xd290e4, 0x66c2cd, 0xd4d4d4,
+                    0x5a5a5a, 0xf48795, 0xbddba4, 0xe6bd93, 0x8cd0f7, 0xdda4ed, 0x7fd4df, 0xffffff,
+                ],
+                fg: hex(0xd4d4d4),
+                bg: hex(0x141414),
+                cursor: hex(0xf0f0f0),
+                selection: hex(0x3c3c3c),
+                crust: hex(0x0a0a0a),
+                mantle: hex(0x101010),
+                surface: hex(0x222222),
+                overlay: hex(0x343434),
+                text: hex(0xe4e4e4),
+                subtext: hex(0x8a8a8a),
+                accent: hex(0xf0f0f0),
+                accent2: hex(0x7a7a7a),
+                ok: hex(0xa8cc8c),
+                warn: hex(0xdbab79),
+                err: hex(0xef6b7b),
+            },
+            Theme {
+                name: "Monochrome",
+                ansi: ansi![
                     0x262626, 0xb0b0b0, 0xd0d0d0, 0xe0e0e0, 0x9a9a9a, 0xc4c4c4, 0xaaaaaa, 0xd4d4d4,
                     0x5a5a5a, 0xcfcfcf, 0xe8e8e8, 0xf2f2f2, 0xb8b8b8, 0xdedede, 0xc8c8c8, 0xffffff,
                 ],
@@ -182,6 +204,11 @@ pub fn all() -> &'static [Theme] {
 
 pub fn by_name(name: &str) -> &'static Theme {
     let all = all();
+    if name == "Graphite" {
+        if let Some(t) = all.iter().find(|t| t.name == "Graphite Mono") {
+            return t;
+        }
+    }
     all.iter().find(|t| t.name == name).unwrap_or(&all[0])
 }
 
@@ -208,3 +235,71 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_themes_present() {
+        let themes = all();
+        assert!(themes.len() >= 6);
+        let names: Vec<&str> = themes.iter().map(|t| t.name).collect();
+        assert!(names.contains(&"Catppuccin Mocha"));
+        assert!(names.contains(&"Graphite Mono"));
+        assert!(names.contains(&"Tokyo Night"));
+        assert!(names.contains(&"Rosé Pine"));
+        assert!(names.contains(&"Gruvbox Dark"));
+        assert!(names.contains(&"Nord"));
+        assert!(names.contains(&"Monochrome"));
+    }
+
+    #[test]
+    fn test_graphite_has_colors() {
+        let gm = by_name("Graphite Mono");
+        // Ensure red, green, blue are distinct and have color (not all grayscale)
+        let red = gm.ansi[1];
+        let green = gm.ansi[2];
+        let blue = gm.ansi[4];
+        assert_ne!(red, green);
+        assert_ne!(green, blue);
+        assert!(red.r() > red.g() && red.r() > red.b(), "red should have dominant red channel");
+        assert!(green.g() > green.r() && green.g() > green.b(), "green should have dominant green channel");
+        assert!(blue.b() > blue.r(), "blue should have dominant blue channel");
+    }
+
+    #[test]
+    fn test_by_name_aliases_and_fallback() {
+        assert_eq!(by_name("Catppuccin Mocha").name, "Catppuccin Mocha");
+        assert_eq!(by_name("Graphite Mono").name, "Graphite Mono");
+        assert_eq!(by_name("Graphite").name, "Graphite Mono"); // alias
+        assert_eq!(by_name("NonExistentTheme").name, "Catppuccin Mocha"); // fallback to default
+    }
+
+    #[test]
+    fn test_palette256() {
+        let t = by_name("Catppuccin Mocha");
+        let p = t.palette256();
+        assert_eq!(p.len(), 256);
+        // First 16 match theme ansi
+        for i in 0..16 {
+            assert_eq!(p[i], t.ansi[i]);
+        }
+        // Cube starts at 16, grayscale starts at 232
+        assert_eq!(p[16], Color32::from_rgb(0, 0, 0));
+        assert_eq!(p[231], Color32::from_rgb(255, 255, 255));
+        // Grayscale ramp ends near 238
+        assert_eq!(p[232], Color32::from_rgb(8, 8, 8));
+        assert_eq!(p[255], Color32::from_rgb(238, 238, 238));
+    }
+
+    #[test]
+    fn test_mix() {
+        let black = Color32::from_rgb(0, 0, 0);
+        let white = Color32::from_rgb(200, 200, 200);
+        assert_eq!(mix(black, white, 0.0), black);
+        assert_eq!(mix(black, white, 1.0), white);
+        assert_eq!(mix(black, white, 0.5), Color32::from_rgb(100, 100, 100));
+    }
+}
+

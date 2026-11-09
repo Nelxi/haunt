@@ -13,6 +13,7 @@ mod session;
 mod shader;
 mod termview;
 mod theme;
+mod veil;
 mod widgets;
 
 use eframe::egui;

@@ -9,6 +9,7 @@ use crate::anim;
 use crate::fonts;
 use crate::fx;
 use crate::theme::{Theme, mix};
+use crate::veil;
 
 fn hover_t(ui: &Ui, resp: &Response) -> f32 {
     anim::toggle(ui.ctx(), resp.id.with("hover"), resp.hovered(), 0.14)
@@ -152,6 +153,22 @@ pub fn field(ui: &mut Ui, t: &Theme, label: &str, value: &mut String, hint: &str
 
 /// Bare input box (optionally with a leading icon).
 pub fn input(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, password: bool, icon: &str) -> Response {
+    input_impl(ui, t, value, hint, password, icon, false)
+}
+
+/// Labelled input whose content is sensitive (a host or IP): in streamer mode it is masked
+/// for screen capture and shown for real in the overlay.
+pub fn veiled_field(ui: &mut Ui, t: &Theme, label: &str, value: &mut String, hint: &str) -> Response {
+    if !label.is_empty() {
+        ui.label(egui::RichText::new(label).size(12.0).color(t.subtext));
+        ui.add_space(-2.0);
+    }
+    let veiled = veil::enabled();
+    input_impl(ui, t, value, hint, veiled, "", veiled)
+}
+
+fn input_impl(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, password: bool, icon: &str, veiled: bool) -> Response {
+    let veiled = veiled || (veil::enabled() && !password && !value.is_empty() && !veil::find(value).is_empty());
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 36.0), Sense::hover());
     let left = if icon.is_empty() { 12.0 } else { 34.0 };
@@ -159,9 +176,10 @@ pub fn input(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, password: b
     // Reserve slots so the box is painted *under* the text, filled in once we know the focus state.
     let glow_slot = ui.painter().add(Shape::Noop);
     let box_slot = ui.painter().add(Shape::Noop);
+    let hide_text = password || veiled;
     let edit = TextEdit::singleline(value)
         .hint_text(egui::RichText::new(hint).color(t.subtext.gamma_multiply(0.7)))
-        .password(password)
+        .password(hide_text)
         .font(fonts::ui(13.5))
         .frame(Frame::NONE)
         .margin(Margin::ZERO)
@@ -187,6 +205,22 @@ pub fn input(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, password: b
     }
     if !icon.is_empty() {
         p.text(pos2(rect.min.x + 17.0, rect.center().y), Align2::CENTER_CENTER, icon, fonts::mono(12.5), mix(t.subtext, t.accent, f));
+    }
+    if veiled && !value.is_empty() {
+        let font = fonts::ui(13.5);
+        let g = p.layout_no_wrap(value.clone(), font.clone(), Color32::PLACEHOLDER);
+        let pos = pos2(inner.min.x, inner.center().y - g.size().y / 2.0);
+        let mut extra = Vec::new();
+        if resp.has_focus() {
+            let idx = TextEdit::load_state(ui.ctx(), resp.id)
+                .and_then(|st| st.cursor.char_range())
+                .map_or(value.chars().count(), |r| r.primary.index.into());
+            let prefix: String = value.chars().take(idx).collect();
+            let x = pos.x + p.layout_no_wrap(prefix, font, Color32::PLACEHOLDER).size().x;
+            extra.push((Rect::from_min_size(pos2(x, pos.y), vec2(2.0, g.size().y)), t.accent));
+        }
+        let chip = Rect::from_min_max(pos2(rect.min.x + 4.0, rect.min.y + 4.0), pos2(rect.max.x - 4.0, rect.max.y - 4.0));
+        veil::cover_with(p, chip, mix(t.mantle, t.crust, 0.6), 7.0, vec![(pos, g, t.text)], extra);
     }
     resp
 }

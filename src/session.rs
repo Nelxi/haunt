@@ -164,6 +164,9 @@ pub struct ConnectSpec {
     pub reconnect: bool,
     /// Port forwards that come up with the connection.
     pub tunnels: Vec<config::Tunnel>,
+    /// Open a terminal. Without one the connection only serves commands, files and
+    /// tunnels (the MCP server): no login shell runs on the server.
+    pub shell: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +213,7 @@ impl ConnectSpec {
             via: via.map(Box::new),
             reconnect: false,
             tunnels: s.tunnels.clone(),
+            shell: true,
         }
     }
 
@@ -601,21 +605,26 @@ impl Task {
         let mut hops = Vec::new();
         let mut handle = self.open(&spec, &mut hops).await?;
 
-        let channel = handle.channel_open_session().await.context(tr!("cannot open a session channel"))?;
-        let size = self.shared.lock().size;
-        channel
-            .request_pty(false, "xterm-256color", size.cols as u32, size.rows as u32, 0, 0, &[])
-            .await
-            .context(tr!("PTY request failed"))?;
-        // Most servers drop env requests (AcceptEnv); harmless when they do.
-        let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
-        channel.request_shell(false).await.context(tr!("shell request failed"))?;
+        let mut channel = if spec.shell {
+            let channel = handle.channel_open_session().await.context(tr!("cannot open a session channel"))?;
+            let size = self.shared.lock().size;
+            channel
+                .request_pty(false, "xterm-256color", size.cols as u32, size.rows as u32, 0, 0, &[])
+                .await
+                .context(tr!("PTY request failed"))?;
+            // Most servers drop env requests (AcceptEnv); harmless when they do.
+            let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
+            channel.request_shell(false).await.context(tr!("shell request failed"))?;
 
-        // The grid may have been resized while we were offline.
-        let now = self.shared.lock().size;
-        if now != size {
-            let _ = channel.window_change(now.cols as u32, now.rows as u32, 0, 0).await;
-        }
+            // The grid may have been resized while we were offline.
+            let now = self.shared.lock().size;
+            if now != size {
+                let _ = channel.window_change(now.cols as u32, now.rows as u32, 0, 0).await;
+            }
+            Some(channel)
+        } else {
+            None
+        };
         {
             let mut sh = self.shared.lock();
             sh.status = Status::Connected;
@@ -632,7 +641,8 @@ impl Task {
         let h = &handle;
         let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = FuturesUnordered::new();
 
-        let mut channel = channel;
+        // Without a terminal nothing tells us the connection died, so look now and then.
+        let mut alive = tokio::time::interval(Duration::from_secs(1));
         let mut exit_status: Option<u32> = None;
         // True when the server ended the channel (the shell exited); false when the whole
         // connection vanished under us.
@@ -640,9 +650,15 @@ impl Task {
         loop {
             tokio::select! {
                 input = rx.recv() => match input {
-                    Some(Input::Data(bytes)) => channel.data(&bytes[..]).await?,
+                    Some(Input::Data(bytes)) => {
+                        if let Some(channel) = &channel {
+                            channel.data(&bytes[..]).await?;
+                        }
+                    }
                     Some(Input::Resize(s)) => {
-                        let _ = channel.window_change(s.cols as u32, s.rows as u32, 0, 0).await;
+                        if let Some(channel) = &channel {
+                            let _ = channel.window_change(s.cols as u32, s.rows as u32, 0, 0).await;
+                        }
                     }
                     Some(Input::RetryNow) => {}
                     Some(Input::OpenDirect { host, port, from_host, from_port, reply }) => {
@@ -691,13 +707,20 @@ impl Task {
                     Some(Input::Close) | None => {
                         drop(runner);
                         drop(pending);
-                        let _ = channel.eof().await;
+                        if let Some(channel) = &channel {
+                            let _ = channel.eof().await;
+                        }
                         let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
                         close_hops(hops).await;
                         return Ok(End::Closed);
                     }
                 },
-                msg = channel.wait() => match msg {
+                msg = async {
+                    match channel.as_mut() {
+                        Some(channel) => channel.wait().await,
+                        None => std::future::pending().await,
+                    }
+                } => match msg {
                     Some(ChannelMsg::Data { data }) => self.out.feed(&data),
                     Some(ChannelMsg::ExtendedData { data, .. }) => self.out.feed(&data),
                     Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
@@ -709,6 +732,11 @@ impl Task {
                     _ => {}
                 },
                 Some(()) = pending.next(), if !pending.is_empty() => {}
+                _ = alive.tick(), if channel.is_none() => {
+                    if handle.is_closed() {
+                        break;
+                    }
+                }
             }
         }
         drop(runner);

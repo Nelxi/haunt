@@ -119,7 +119,7 @@ fn valid_name(name: &str) -> bool {
 
 // ---------------------------------------------------------------- errors
 
-fn io_err(e: std::io::Error) -> String {
+pub(crate) fn io_err(e: std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::NotFound => tr!("no such file or folder").into(),
         std::io::ErrorKind::PermissionDenied => tr!("permission denied").into(),
@@ -127,7 +127,7 @@ fn io_err(e: std::io::Error) -> String {
     }
 }
 
-fn sftp_err(e: SftpError) -> String {
+pub(crate) fn sftp_err(e: SftpError) -> String {
     match e {
         SftpError::Status(s) => match s.status_code {
             StatusCode::NoSuchFile => tr!("no such file or folder").into(),

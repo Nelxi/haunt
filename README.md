@@ -58,6 +58,7 @@ like a riced Hyprland desktop.
 **Workflow**
 - saved servers with groups and search; a start screen with quick connect and recent servers
 - launcher (`Ctrl K`) with fuzzy search and quick connect to `user@host:port`
+- **MCP server for AI agents** (`haunt.exe mcp`): JSON-RPC over stdio so Claude Code, Codex and other tools can list servers, run commands, and read / write / edit files on the servers you explicitly enabled in Settings → AI agents, using your saved keys and passwords; every action is written to `mcp.log`, one-click setup for Claude Code and Codex
 - tabs, duplicate tab, jump to tab with `Ctrl 1…9`
 
 ## Install
@@ -111,7 +112,7 @@ haunt keeps its own `known_hosts` next to the config and also trusts `~/.ssh/kno
 - [x] port forwarding: `-L`, `-R`, SOCKS / HTTP proxy
 - [x] one command on many servers at once
 - [ ] split panes, snippets
-- [ ] MCP server so AI agents (Claude Code, Codex) can run commands on your servers with per-server permissions
+- [x] MCP server so AI agents (Claude Code, Codex) can run commands on your servers with per-server permissions
 - [ ] macOS and Linux, Android
 
 ## License

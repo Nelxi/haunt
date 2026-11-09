@@ -9,6 +9,7 @@ mod fonts;
 mod fx;
 mod i18n;
 mod import;
+mod mcp;
 mod multi;
 mod platform;
 mod secrets;
@@ -23,6 +24,11 @@ mod tunnels;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // `haunt mcp`: the server for AI agents, on stdin/stdout, without a window.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+        std::process::exit(mcp::main());
+    }
     attach_console();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 

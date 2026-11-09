@@ -59,6 +59,7 @@ pub mod icon {
     pub const CHECK: &str = "\u{f00c}";
     pub const TUNNEL: &str = "\u{f0ec}";
     pub const ARROW_LEFT: &str = "\u{f060}";
+    pub const ROBOT: &str = "\u{f06a9}";
 }
 
 fn fonts_dir() -> PathBuf {

@@ -37,6 +37,9 @@ pub struct Server {
     /// Port forwards that come up with every connection to this server.
     #[serde(default, rename = "tunnel", skip_serializing_if = "Vec::is_empty")]
     pub tunnels: Vec<Tunnel>,
+    /// Shared with AI agents through `haunt mcp`. Off until the user turns it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ai: bool,
 }
 
 /// One port forward, like `ssh -L`, `-R` or `-D`.
@@ -134,6 +137,7 @@ impl Server {
             proxy: Proxy::None,
             last_used: None,
             tunnels: Vec::new(),
+            ai: false,
         }
     }
 

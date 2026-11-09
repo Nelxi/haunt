@@ -139,6 +139,8 @@ pub struct HauntApp {
     /// "Run on servers": its state outlives the dialog, so a run goes on while it is closed.
     multi: crate::multi::Multi,
     show_multi: bool,
+    /// Adding haunt to an AI agent runs on a thread; its result comes back here.
+    ai_setup: Option<std::sync::mpsc::Receiver<crate::mcp::Setup>>,
 }
 
 impl HauntApp {
@@ -198,6 +200,7 @@ impl HauntApp {
             quick: String::new(),
             multi: Default::default(),
             show_multi: false,
+            ai_setup: None,
         };
         // Debug builds: open a screen on start for screenshot checks (no key presses needed).
         #[cfg(debug_assertions)]
@@ -1204,6 +1207,7 @@ impl HauntApp {
                     via: None,
                     reconnect: false,
                     tunnels: Vec::new(),
+                    shell: true,
                 };
                 self.open_spec(&ctx, format!("{user}@{host}"), spec);
             } else if !q.is_empty() {
@@ -1611,6 +1615,19 @@ impl HauntApp {
 
     fn settings_dialog(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
+        if let Some(rx) = &self.ai_setup {
+            match rx.try_recv() {
+                Ok(done) => {
+                    self.ai_setup = None;
+                    if let Some(cmd) = done.copy {
+                        ctx.copy_text(cmd);
+                    }
+                    self.notify(ctx, done.text, done.error);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.ai_setup = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(200)),
+            }
+        }
         if !self.show_settings {
             self.opened.remove("settings");
             return;
@@ -1619,6 +1636,9 @@ impl HauntApp {
         let opened = self.opened_at("settings", now);
         let mut close = false;
         let mut import = None;
+        let mut install = None;
+        let mut open_log = false;
+        let installing = self.ai_setup.is_some();
         let max_h = (ctx.content_rect().height() - 160.0).clamp(240.0, 620.0);
         let (_, dismissed) = widgets::dialog(ctx, t, Id::unique("settings"), opened, 560.0, |ui| {
             ui.horizontal(|ui| {
@@ -1734,6 +1754,38 @@ impl HauntApp {
                 slider(ui, t, tr!("Keepalive"), &mut ka, 0.0..=120.0, 5.0, tr!("s, 0 = off"));
                 s.keepalive_secs = ka as u64;
 
+                widgets::section(ui, t, icon::ROBOT, tr!("AI agents"));
+                ui.label(
+                    RichText::new(tr!("Claude Code, Codex and other agents can run commands and edit files on the servers turned on below, with your saved keys and passwords. Everything they do is written to a log."))
+                        .size(12.0)
+                        .color(t.subtext),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!installing, |ui| {
+                        if widgets::secondary(ui, t, icon::PLUG, "Claude Code", vec2(150.0, 34.0)).on_hover_text(tr!("Add haunt to Claude Code")).clicked() {
+                            install = Some(crate::mcp::Agent::Claude);
+                        }
+                        ui.add_space(6.0);
+                        if widgets::secondary(ui, t, icon::PLUG, "Codex", vec2(120.0, 34.0)).on_hover_text(tr!("Add haunt to Codex")).clicked() {
+                            install = Some(crate::mcp::Agent::Codex);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if widgets::secondary(ui, t, icon::FILE, tr!("Log"), vec2(100.0, 34.0)).on_hover_text(tr!("What agents did on your servers")).clicked() {
+                        open_log = true;
+                    }
+                });
+                ui.add_space(8.0);
+                if self.cfg.servers.is_empty() {
+                    ui.label(RichText::new(tr!("No servers yet")).size(12.0).color(t.subtext));
+                }
+                for server in &mut self.cfg.servers {
+                    let name = server.display_name().to_string();
+                    let group = server.group.trim().to_string();
+                    widgets::toggle(ui, t, &mut server.ai, &name, &group);
+                }
+
                 widgets::section(ui, t, icon::FOLDER, tr!("Import"));
                 ui.label(RichText::new(tr!("Adds sessions that are not saved yet. Passwords are never imported.")).size(12.0).color(t.subtext));
                 ui.add_space(6.0);
@@ -1751,6 +1803,23 @@ impl HauntApp {
         });
         if let Some(src) = import {
             self.import_sessions(ctx, src);
+        }
+        if let Some(agent) = install {
+            // The agent reads the shared servers from the config, so it must be on disk.
+            self.save(ctx);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let repaint = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::mcp::install(agent));
+                repaint.request_repaint();
+            });
+            self.ai_setup = Some(rx);
+        }
+        if open_log {
+            match crate::mcp::log_path() {
+                Some(path) if path.exists() => crate::platform::open_path(&path),
+                _ => self.notify(ctx, tr!("No agent has done anything yet"), false),
+            }
         }
         if dismissed || close {
             self.show_settings = false;
@@ -1895,6 +1964,7 @@ impl HauntApp {
                         via: None,
                         reconnect: false,
                         tunnels: Vec::new(),
+                        shell: true,
                     };
                     self.open_spec(ctx, format!("{user}@{host}"), spec);
                 }

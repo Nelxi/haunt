@@ -1,6 +1,7 @@
 //! Terminal widget: draws the alacritty grid with the egui painter and turns
 //! keyboard/mouse input into the byte sequences an xterm-compatible host expects.
 
+use crate::tr;
 use std::f32::consts::{PI, TAU};
 use std::time::{Duration, Instant};
 
@@ -947,12 +948,12 @@ fn draw_status(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, theme: &Theme
         return;
     }
     let (text, color) = match status {
-        Status::Connecting | Status::Connected => ("connecting…".to_string(), theme.warn),
+        Status::Connecting | Status::Connected => (tr!("connecting…").to_string(), theme.warn),
         Status::Reconnecting(at) => {
             let left = at.saturating_duration_since(std::time::Instant::now()).as_secs_f32().ceil() as u64;
-            (format!("connection lost  ·  reconnecting in {left} s  ·  Enter = now"), theme.warn)
+            (tr!("connection lost  ·  reconnecting in {n} s  ·  Enter = now", n = left), theme.warn)
         }
-        Status::Closed(_) => ("disconnected  ·  press Enter to reconnect".to_string(), theme.err),
+        Status::Closed(_) => (tr!("disconnected  ·  press Enter to reconnect").to_string(), theme.err),
     };
     let galley = painter.layout_no_wrap(text, fonts::ui(13.0), theme.text);
     let size = galley.size() + vec2(36.0, 14.0);

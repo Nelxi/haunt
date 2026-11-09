@@ -37,7 +37,7 @@ like a riced Hyprland desktop.
 - password and key auth; OpenSSH, PEM **and PuTTY `.ppk` keys** load natively
 - host key verification with SHA-256 fingerprints and a loud warning when a key changes
 - secrets live in **Windows Credential Manager**, never in the config file
-- keepalive, reconnect in place (same tab, same scrollback)
+- keepalive; when a working connection drops, haunt says why and **reconnects by itself** with growing pauses (same tab, same scrollback)
 - **proxies like PuTTY**: SOCKS5 and HTTP CONNECT (with auth, DNS resolved by the proxy) or a **jump host** through another saved server (ProxyJump), chains of any depth
 
 **Looks**
@@ -46,6 +46,7 @@ like a riced Hyprland desktop.
 - HyDE/Hyprland animation curves for tabs, dialogs, toasts and pane switches
 - themes: Ghostly Night (default), Catppuccin Mocha, Graphite Mono, Tokyo Night, Rosé Pine, Gruvbox Dark, Nord
 - every effect can be switched off for a calm, minimal UI
+- interface in English, Russian, Ukrainian, German, Spanish and French; follows the Windows language by default
 
 **Workflow**
 - saved servers with groups and search; a start screen with quick connect and recent servers

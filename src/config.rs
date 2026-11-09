@@ -101,6 +101,8 @@ pub enum CursorStyle {
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
+    /// Interface language code ("ru", "de", ...); empty follows the system.
+    pub language: String,
     pub font_size: f32,
     pub line_height: f32,
     pub scrollback: usize,
@@ -144,6 +146,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "Ghostly Night".into(),
+            language: String::new(),
             font_size: 13.5,
             line_height: 1.2,
             scrollback: 10_000,

@@ -3,6 +3,7 @@
 //! gaps between them, like tiled windows in HyDE. The titlebar, tabs, dialogs and
 //! launcher are all drawn here.
 
+use crate::tr;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -142,6 +143,7 @@ impl HauntApp {
         fonts::install(&cc.egui_ctx);
         log::debug!("startup: fonts {:?}", t0.elapsed());
         let (mut cfg, load_error) = Config::load();
+        crate::i18n::set(&cfg.settings.language);
         // Debug builds: override opacity for visual tests without touching the saved config.
         #[cfg(debug_assertions)]
         if let Some(op) = std::env::var("HAUNT_OPACITY").ok().and_then(|v| v.parse().ok()) {
@@ -245,7 +247,7 @@ impl HauntApp {
             ImportSource::SshConfig => (import::ssh_config(), "~/.ssh/config"),
         };
         if found.servers.is_empty() {
-            self.notify(ctx, format!("No sessions found in {label}"), true);
+            self.notify(ctx, tr!("No sessions found in {label}", label = label), true);
             return;
         }
         let total = found.servers.len();
@@ -253,14 +255,14 @@ impl HauntApp {
         let added = import::merge(&mut self.cfg.servers, found.servers);
         let linked = import::link_jumps(&mut self.cfg.servers, found.jumps, &group);
         let mut msg = match added {
-            0 => format!("All {total} sessions from {label} are already saved"),
-            n => format!("Imported {n} of {total} sessions from {label}"),
+            0 => tr!("All {n} {n:session|sessions} from {label} are already saved", n = total, label = label),
+            n => tr!("Imported {n} of {total} {total:session|sessions} from {label}", n = n, total = total, label = label),
         };
         if linked > 0 {
-            msg.push_str(&format!(", {linked} through a jump host"));
+            msg.push_str(&tr!(", {n} through a jump host", n = linked));
         }
         if found.unsupported > 0 && added > 0 {
-            msg.push_str(&format!(" ({} use an unsupported proxy, imported as direct)", found.unsupported));
+            msg.push_str(&tr!(" ({n} with an unsupported proxy, imported as direct)", n = found.unsupported));
         }
         self.notify(ctx, msg, false);
         if added > 0 || linked > 0 {
@@ -275,7 +277,7 @@ impl HauntApp {
 
     fn save(&mut self, ctx: &egui::Context) {
         if let Err(e) = self.cfg.save() {
-            self.notify(ctx, format!("could not save config: {e:#}"), true);
+            self.notify(ctx, tr!("Could not save the config: {e}", e = format!("{e:#}")), true);
         }
     }
 
@@ -464,9 +466,9 @@ impl HauntApp {
             self.notify(
                 ctx,
                 if self.cfg.settings.streamer_mode {
-                    "Streamer mode enabled"
+                    tr!("Streamer mode enabled")
                 } else {
-                    "Streamer mode disabled"
+                    tr!("Streamer mode disabled")
                 },
                 false,
             );
@@ -586,10 +588,10 @@ impl HauntApp {
         if bt(min_r, icon::MINIMIZE, false, "").clicked() {
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
         }
-        if bt(settings_r, icon::GEAR, false, "Settings  (Ctrl+,)").clicked() {
+        if bt(settings_r, icon::GEAR, false, tr!("Settings  (Ctrl+,)")).clicked() {
             self.show_settings = true;
         }
-        if bt(launch_r, icon::SEARCH, false, "Launcher  (Ctrl+K)").clicked() {
+        if bt(launch_r, icon::SEARCH, false, tr!("Launcher  (Ctrl+K)")).clicked() {
             self.launcher = Some(Launcher { query: String::new(), selected: 0 });
         }
 
@@ -694,7 +696,7 @@ impl HauntApp {
             let hov = anim::toggle(&ctx, resp.id, resp.hovered(), 0.15);
             painter.rect_filled(plus, CornerRadius::same(255), Color32::from_white_alpha((4.0 + 12.0 * hov) as u8));
             fx::glyph(&painter, plus.center(), icon::PLUS, fonts::mono(12.0), mix(t.subtext, t.accent, hov));
-            if resp.on_hover_text("New connection  (Ctrl+K)").on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            if resp.on_hover_text(tr!("New connection  (Ctrl+K)")).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 self.launcher = Some(Launcher { query: String::new(), selected: 0 });
             }
         }
@@ -758,7 +760,7 @@ impl HauntApp {
             // Header: title + count on the left, "+" on the right, one centre line.
             let (hr, _) = ui.allocate_exact_size(vec2(inner.width(), 28.0), Sense::hover());
             let hp = ui.painter();
-            let title = fx::text(hp, pos2(hr.min.x + 2.0, hr.center().y), Align2::LEFT_CENTER, "Servers", fonts::bold(14.0), t.text);
+            let title = fx::text(hp, pos2(hr.min.x + 2.0, hr.center().y), Align2::LEFT_CENTER, tr!("Servers"), fonts::bold(14.0), t.text);
             fx::text(
                 hp,
                 pos2(title.max.x + 8.0, hr.center().y),
@@ -769,11 +771,11 @@ impl HauntApp {
             );
             let plus = Rect::from_min_size(pos2(hr.max.x - 28.0, hr.min.y), vec2(28.0, 28.0));
             let pr = ui.scope_builder(UiBuilder::new().max_rect(plus), |ui| widgets::icon_button(ui, t, icon::PLUS, plus.size(), false)).inner;
-            if pr.on_hover_text("New server  (Ctrl+Shift+N)").clicked() {
+            if pr.on_hover_text(tr!("New server  (Ctrl+Shift+N)")).clicked() {
                 add = true;
             }
             ui.add_space(12.0);
-            widgets::input(ui, t, &mut self.search, "Search servers", false, icon::SEARCH);
+            widgets::input(ui, t, &mut self.search, tr!("Search servers"), false, icon::SEARCH);
             ui.add_space(12.0);
 
             let foot_h = 44.0;
@@ -823,15 +825,15 @@ impl HauntApp {
                 if self.cfg.servers.is_empty() {
                     ui.add_space(16.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("No servers yet").font(fonts::ui(13.0)).color(t.subtext));
+                        ui.label(RichText::new(tr!("No servers yet")).font(fonts::ui(13.0)).color(t.subtext));
                         ui.add_space(10.0);
-                        if widgets::secondary(ui, t, icon::PLUS, "Add one", vec2(132.0, widgets::CONTROL_H)).clicked() {
+                        if widgets::secondary(ui, t, icon::PLUS, tr!("Add one"), vec2(132.0, widgets::CONTROL_H)).clicked() {
                             add = true;
                         }
                     });
                 } else if idx == 0 {
                     ui.add_space(16.0);
-                    ui.vertical_centered(|ui| ui.label(RichText::new("Nothing matches").font(fonts::ui(13.0)).color(t.subtext)));
+                    ui.vertical_centered(|ui| ui.label(RichText::new(tr!("Nothing matches")).font(fonts::ui(13.0)).color(t.subtext)));
                 }
             });
 
@@ -843,7 +845,7 @@ impl HauntApp {
             );
             let gear = Rect::from_min_size(pos2(foot.min.x, foot.center().y - 16.0), vec2(32.0, 32.0));
             let gr = ui.scope_builder(UiBuilder::new().max_rect(gear), |ui| widgets::icon_button(ui, t, icon::GEAR, gear.size(), false)).inner;
-            if gr.on_hover_text("Settings  (Ctrl+,)").clicked() {
+            if gr.on_hover_text(tr!("Settings  (Ctrl+,)")).clicked() {
                 open_settings = true;
             }
             let fp = ui.painter();
@@ -851,7 +853,7 @@ impl HauntApp {
             let mut x = gear.max.x + 10.0;
             x += fx::kbd(fp, pos2(x, foot.center().y), "Ctrl", t.subtext, line) + 4.0;
             x += fx::kbd(fp, pos2(x, foot.center().y), "K", t.subtext, line) + 8.0;
-            fx::text(fp, pos2(x, foot.center().y), Align2::LEFT_CENTER, "launcher", fonts::ui(12.0), t.subtext.gamma_multiply(0.8));
+            fx::text(fp, pos2(x, foot.center().y), Align2::LEFT_CENTER, tr!("launcher"), fonts::ui(12.0), t.subtext.gamma_multiply(0.8));
         });
 
         if add {
@@ -914,18 +916,18 @@ impl HauntApp {
         let mut hp = p.clone();
         hp.multiply_opacity(a);
         let hy = y + dy * 12.0;
-        fx::text(&hp, pos2(x0, hy + 14.0), Align2::LEFT_CENTER, "Connect", fonts::display(26.0), t.text);
+        fx::text(&hp, pos2(x0, hy + 14.0), Align2::LEFT_CENTER, tr!("Connect"), fonts::display(26.0), t.text);
         let open = self.sessions.len();
         let summary = match (self.cfg.servers.len(), open) {
-            (0, _) => "Add a server or type an address below".to_string(),
-            (1, _) => "1 saved server".to_string(),
-            (n, _) => format!("{n} saved servers"),
+            (0, _) => tr!("Add a server or type an address below").to_string(),
+            (n, _) => tr!("{n} saved {n:server|servers}", n = n),
         };
         fx::text(&hp, pos2(x0, hy + 42.0), Align2::LEFT_CENTER, summary, fonts::ui(13.0), t.subtext);
-        let nb = Rect::from_min_size(pos2(x1 - 140.0, hy + 10.0), vec2(140.0, widgets::CONTROL_H));
+        let nb_w = widgets::button_width(ui, icon::PLUS, tr!("New server")).max(140.0);
+        let nb = Rect::from_min_size(pos2(x1 - nb_w, hy + 10.0), vec2(nb_w, widgets::CONTROL_H));
         ui.scope_builder(UiBuilder::new().max_rect(nb), |ui| {
             ui.multiply_opacity(a);
-            if widgets::secondary(ui, t, icon::PLUS, "New server", nb.size()).clicked() {
+            if widgets::secondary(ui, t, icon::PLUS, tr!("New server"), nb.size()).clicked() {
                 new_server = true;
             }
         });
@@ -944,7 +946,8 @@ impl HauntApp {
         }
         fx::plate(&bp, bar, 16.0, Color32::from_black_alpha(110), t.accent, 0.35 + 0.65 * f);
         fx::glyph(&bp, pos2(bar.min.x + 26.0, bar.center().y), icon::BOLT, fonts::mono(14.0), mix(t.subtext, t.accent, 0.4 + 0.6 * f));
-        let btn = Rect::from_min_size(pos2(bar.max.x - 8.0 - 116.0, bar.center().y - 20.0), vec2(116.0, 40.0));
+        let btn_w = widgets::button_width(ui, icon::ARROW, tr!("Connect")).max(116.0);
+        let btn = Rect::from_min_size(pos2(bar.max.x - 8.0 - btn_w, bar.center().y - 20.0), vec2(btn_w, 40.0));
         let font = fonts::mono(14.0);
         let tdy = fx::text_dy(&bp, &font);
         let field = Rect::from_min_max(pos2(bar.min.x + 48.0, bar.min.y), pos2(btn.min.x - 12.0, bar.max.y)).translate(vec2(0.0, tdy));
@@ -955,7 +958,7 @@ impl HauntApp {
                     field.size(),
                     egui::TextEdit::singleline(&mut self.quick)
                         .id(edit_id)
-                        .hint_text(RichText::new("user@host:port  or a server name").font(font.clone()).color(t.subtext.gamma_multiply(0.55)))
+                        .hint_text(RichText::new(tr!("user@host:port  or a server name")).font(font.clone()).color(t.subtext.gamma_multiply(0.55)))
                         .font(font.clone())
                         .text_color(t.text)
                         .frame(egui::Frame::NONE)
@@ -969,7 +972,7 @@ impl HauntApp {
         }
         ui.scope_builder(UiBuilder::new().max_rect(btn), |ui| {
             ui.multiply_opacity(a);
-            if widgets::primary(ui, t, icon::ARROW, "Connect", btn.size()).clicked() {
+            if widgets::primary(ui, t, icon::ARROW, tr!("Connect"), btn.size()).clicked() {
                 quick_go = true;
             }
         });
@@ -981,9 +984,9 @@ impl HauntApp {
         lp.multiply_opacity(a);
         let ly = y + dy * 12.0;
         if !recent.is_empty() {
-            fx::text(&lp, pos2(x0 + 4.0, ly + 10.0), Align2::LEFT_CENTER, "RECENT", fonts::bold(11.0), t.subtext);
+            fx::text(&lp, pos2(x0 + 4.0, ly + 10.0), Align2::LEFT_CENTER, tr!("RECENT"), fonts::bold(11.0), t.subtext);
             let line = Color32::from_white_alpha(20);
-            let label = "to search everything";
+            let label = tr!("to search everything");
             let lw = lp.layout_no_wrap(label.into(), fonts::ui(12.0), Color32::PLACEHOLDER).size().x;
             let mut kx = x1 - 4.0 - lw - 8.0 - kbd_w(&lp, "K") - 4.0 - kbd_w(&lp, "Ctrl");
             kx += fx::kbd(&lp, pos2(kx, ly + 10.0), "Ctrl", t.subtext, line) + 4.0;
@@ -1032,17 +1035,17 @@ impl HauntApp {
             // First run: bring sessions over from PuTTY / OpenSSH.
             let box_r = Rect::from_min_size(pos2(x0, ly), vec2(col_w, list_h));
             fx::plate(&lp, box_r, 16.0, Color32::from_white_alpha(4), t.accent, 0.0);
-            fx::text(&lp, pos2(x0 + 24.0, ly + 34.0), Align2::LEFT_CENTER, "Already have sessions?", fonts::bold(14.0), t.text);
-            fx::text(&lp, pos2(x0 + 24.0, ly + 56.0), Align2::LEFT_CENTER, "Hosts, users, keys and jump hosts come over as they are.", fonts::ui(12.5), t.subtext);
+            fx::text(&lp, pos2(x0 + 24.0, ly + 34.0), Align2::LEFT_CENTER, tr!("Already have sessions?"), fonts::bold(14.0), t.text);
+            fx::text(&lp, pos2(x0 + 24.0, ly + 56.0), Align2::LEFT_CENTER, tr!("Hosts, users, keys and jump hosts come over as they are."), fonts::ui(12.5), t.subtext);
             let row = Rect::from_min_size(pos2(x0 + 24.0, ly + 76.0), vec2(col_w - 48.0, widgets::CONTROL_H));
             ui.scope_builder(UiBuilder::new().max_rect(row), |ui| {
                 ui.multiply_opacity(a);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    if widgets::secondary(ui, t, icon::FOLDER, "Import PuTTY", vec2(156.0, widgets::CONTROL_H)).clicked() {
+                    if widgets::secondary(ui, t, icon::FOLDER, tr!("Import PuTTY"), vec2(156.0, widgets::CONTROL_H)).clicked() {
                         import = Some(ImportSource::Putty);
                     }
-                    if widgets::secondary(ui, t, icon::KEY, "Import ~/.ssh/config", vec2(196.0, widgets::CONTROL_H)).clicked() {
+                    if widgets::secondary(ui, t, icon::KEY, tr!("Import ~/.ssh/config"), vec2(196.0, widgets::CONTROL_H)).clicked() {
                         import = Some(ImportSource::SshConfig);
                     }
                 });
@@ -1054,10 +1057,10 @@ impl HauntApp {
         let mut sp = p.clone();
         sp.multiply_opacity(a * 0.9);
         let hints: [(&[&str], &str); 4] = [
-            (&["Ctrl", "K"], "launcher"),
-            (&["Ctrl", "Shift", "N"], "new server"),
-            (&["Ctrl", "B"], "sidebar"),
-            (&["Ctrl", "Shift", "S"], "streamer mode"),
+            (&["Ctrl", "K"], tr!("launcher")),
+            (&["Ctrl", "Shift", "N"], tr!("new server")),
+            (&["Ctrl", "B"], tr!("sidebar")),
+            (&["Ctrl", "Shift", "S"], tr!("streamer mode")),
         ];
         let lf = fonts::ui(12.0);
         let width: f32 = hints
@@ -1100,7 +1103,7 @@ impl HauntApp {
                 };
                 self.open_spec(&ctx, format!("{user}@{host}"), spec);
             } else if !q.is_empty() {
-                self.notify(&ctx, "Type user@host[:port] or the name of a saved server", true);
+                self.notify(&ctx, tr!("Type user@host[:port] or the name of a saved server"), true);
             } else {
                 launcher = true;
             }
@@ -1157,10 +1160,10 @@ impl HauntApp {
                         });
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        if widgets::primary(ui, t, icon::SHIELD, "Trust and connect", vec2(190.0, 36.0)).clicked() {
+                        if widgets::primary(ui, t, icon::SHIELD, tr!("Trust and connect"), vec2(190.0, 36.0)).clicked() {
                             answer = Some(Some(("accept".into(), false)));
                         }
-                        if widgets::secondary(ui, t, "", "Cancel", vec2(100.0, 36.0)).clicked() {
+                        if widgets::secondary(ui, t, "", tr!("Cancel"), vec2(100.0, 36.0)).clicked() {
                             answer = Some(None);
                         }
                     });
@@ -1173,14 +1176,14 @@ impl HauntApp {
                     edit.request_focus();
                     if can_remember {
                         ui.add_space(6.0);
-                        widgets::toggle(ui, t, &mut self.prompt_remember, "Remember", "Stored in Windows Credential Manager");
+                        widgets::toggle(ui, t, &mut self.prompt_remember, tr!("Remember"), tr!("Stored in Windows Credential Manager"));
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        if widgets::primary(ui, t, icon::ARROW, "Connect", vec2(130.0, 36.0)).clicked() || enter {
+                        if widgets::primary(ui, t, icon::ARROW, tr!("Connect"), vec2(130.0, 36.0)).clicked() || enter {
                             answer = Some(Some((std::mem::take(&mut self.prompt_input), self.prompt_remember && can_remember)));
                         }
-                        if widgets::secondary(ui, t, "", "Cancel", vec2(100.0, 36.0)).clicked() {
+                        if widgets::secondary(ui, t, "", tr!("Cancel"), vec2(100.0, 36.0)).clicked() {
                             answer = Some(None);
                         }
                     });
@@ -1224,75 +1227,75 @@ impl HauntApp {
             .map(|s| (s.id, s.display_name().to_string(), format!("{}@{}:{}", s.user, s.host, s.port)))
             .collect();
         let (_, dismissed) = widgets::dialog(ctx, t, Id::unique("editor"), opened, 520.0, |ui| {
-            dialog_header(ui, t, icon::SERVER, if ed.is_new { "New server" } else { "Edit server" });
-            widgets::field(ui, t, "Name", &mut ed.server.name, "My server", false);
+            dialog_header(ui, t, icon::SERVER, if ed.is_new { tr!("New server") } else { tr!("Edit server") });
+            widgets::field(ui, t, tr!("Name"), &mut ed.server.name, tr!("My server"), false);
             ui.add_space(4.0);
             two_cols(ui, 0.72, |ui| {
-                widgets::veiled_field(ui, t, "Host", &mut ed.server.host, "example.com or 203.0.113.5");
+                widgets::veiled_field(ui, t, tr!("Host"), &mut ed.server.host, tr!("example.com or 203.0.113.5"));
             }, |ui| {
-                widgets::field(ui, t, "Port", &mut ed.port, "22", false);
+                widgets::field(ui, t, tr!("Port"), &mut ed.port, "22", false);
             });
             ui.add_space(4.0);
             two_cols(ui, 0.5, |ui| {
-                widgets::field(ui, t, "User", &mut ed.server.user, "root", false);
+                widgets::field(ui, t, tr!("User"), &mut ed.server.user, "root", false);
             }, |ui| {
-                widgets::field(ui, t, "Group", &mut ed.server.group, "optional", false);
+                widgets::field(ui, t, tr!("Group"), &mut ed.server.group, tr!("optional"), false);
             });
 
-            widgets::section(ui, t, icon::KEY, "Authentication");
+            widgets::section(ui, t, icon::KEY, tr!("Authentication"));
             let mut mode = ed.use_key as usize;
-            if widgets::segmented(ui, t, Id::unique("auth-seg"), &mut mode, &["Password", "Private key"]).changed() {
+            if widgets::segmented(ui, t, Id::unique("auth-seg"), &mut mode, &[tr!("Password"), tr!("Private key")]).changed() {
                 ed.use_key = mode == 1;
             }
             ui.add_space(4.0);
             if ed.use_key {
-                let browse_w = 112.0;
+                let browse_w = widgets::button_width(ui, icon::FOLDER, tr!("Browse")).max(112.0);
                 let mut browse = false;
                 two_cols_fixed(ui, browse_w, |ui| {
-                    widgets::field(ui, t, "Key file", &mut ed.key_path, ".ppk, OpenSSH or PEM", false);
+                    widgets::field(ui, t, tr!("Key file"), &mut ed.key_path, tr!(".ppk, OpenSSH or PEM"), false);
                 }, |ui| {
                     // Skip exactly the label row so the button sits level with the input.
                     ui.add_space(widgets::LABEL_H);
-                    browse = widgets::secondary(ui, t, icon::FOLDER, "Browse", vec2(browse_w, widgets::CONTROL_H)).clicked();
+                    browse = widgets::secondary(ui, t, icon::FOLDER, tr!("Browse"), vec2(browse_w, widgets::CONTROL_H)).clicked();
                 });
                 if browse
-                    && let Some(p) = rfd::FileDialog::new().set_title("Choose a private key").pick_file() {
+                    && let Some(p) = rfd::FileDialog::new().set_title(tr!("Choose a private key")).pick_file() {
                         ed.key_path = p.display().to_string();
                     }
                 ui.add_space(4.0);
-                widgets::field(ui, t, "Passphrase", &mut ed.secret, "empty = ask if needed", true);
+                widgets::field(ui, t, tr!("Passphrase"), &mut ed.secret, tr!("empty = ask if needed"), true);
             } else {
-                let hint = if ed.is_new { "empty = ask on connect" } else { "empty = keep current" };
-                widgets::field(ui, t, "Password", &mut ed.secret, hint, true);
+                let hint = if ed.is_new { tr!("empty = ask on connect") } else { tr!("empty = keep current") };
+                widgets::field(ui, t, tr!("Password"), &mut ed.secret, hint, true);
             }
 
-            widgets::section(ui, t, icon::ROUTE, "Route");
-            widgets::segmented(ui, t, Id::unique("proxy-seg"), &mut ed.proxy_kind, &["Direct", "SOCKS5", "HTTP", "Jump host"]);
+            widgets::section(ui, t, icon::ROUTE, tr!("Route"));
+            widgets::segmented(ui, t, Id::unique("proxy-seg"), &mut ed.proxy_kind, &[tr!("Direct"), "SOCKS5", "HTTP", tr!("Jump host")]);
             ui.add_space(4.0);
             match ed.proxy_kind {
                 1 | 2 => {
                     two_cols(ui, 0.72, |ui| {
-                        widgets::veiled_field(ui, t, "Proxy host", &mut ed.proxy_host, "127.0.0.1");
+                        widgets::veiled_field(ui, t, tr!("Proxy host"), &mut ed.proxy_host, "127.0.0.1");
                     }, |ui| {
                         let def = if ed.proxy_kind == 1 { "1080" } else { "3128" };
-                        widgets::field(ui, t, "Port", &mut ed.proxy_port, def, false);
+                        widgets::field(ui, t, tr!("Port"), &mut ed.proxy_port, def, false);
                     });
                     ui.add_space(4.0);
                     two_cols(ui, 0.5, |ui| {
-                        widgets::field(ui, t, "Proxy user", &mut ed.proxy_user, "optional", false);
+                        widgets::field(ui, t, tr!("Proxy user"), &mut ed.proxy_user, tr!("optional"), false);
                     }, |ui| {
-                        let hint = if ed.is_new { "empty = ask" } else { "empty = keep" };
-                        widgets::field(ui, t, "Proxy password", &mut ed.proxy_secret, hint, true);
+                        let hint = if ed.is_new { tr!("empty = ask") } else { tr!("empty = keep") };
+                        widgets::field(ui, t, tr!("Proxy password"), &mut ed.proxy_secret, hint, true);
                     });
                     hint_line(ui, t, if ed.proxy_kind == 1 {
-                        "The proxy resolves the host name, so DNS does not leak locally."
+                        tr!("The proxy resolves the host name, so DNS does not leak locally.")
                     } else {
-                        "Uses HTTP CONNECT; the proxy must allow the SSH port."
+                        tr!("Uses HTTP CONNECT; the proxy must allow the SSH port.")
                     });
                 }
                 3 => {
                     if jumpable.is_empty() {
-                        hint_line(ui, t, "Save the jump server first, then pick it here.");
+                        hint_line(ui, t, tr!("Save the jump server first, then pick it here."));
                     } else {
                         egui::ScrollArea::vertical().max_height(46.0 * 3.0).auto_shrink([false, true]).show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
@@ -1302,14 +1305,14 @@ impl HauntApp {
                                 }
                             }
                         });
-                        hint_line(ui, t, "haunt logs in to that server first and tunnels through it (like ProxyJump). Jump servers can chain.");
+                        hint_line(ui, t, tr!("haunt logs in to that server first and tunnels through it (like ProxyJump). Jump servers can chain."));
                     }
                 }
                 _ => {}
             }
 
             ui.add_space(8.0);
-            hint_line(ui, t, "Secrets live in Windows Credential Manager, never in the config file.");
+            hint_line(ui, t, tr!("Secrets live in Windows Credential Manager, never in the config file."));
             if let Some(e) = &ed.error {
                 ui.add_space(4.0);
                 ui.label(RichText::new(e).font(fonts::ui(13.0)).color(t.err));
@@ -1317,14 +1320,14 @@ impl HauntApp {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                if widgets::primary(ui, t, icon::BOLT, "Save and connect", vec2(184.0, widgets::CONTROL_H)).clicked() {
+                if widgets::primary(ui, t, icon::BOLT, tr!("Save and connect"), vec2(184.0, widgets::CONTROL_H)).clicked() {
                     save = true;
                     save_connect = true;
                 }
-                if widgets::secondary(ui, t, "", "Save", vec2(88.0, widgets::CONTROL_H)).clicked() {
+                if widgets::secondary(ui, t, "", tr!("Save"), vec2(88.0, widgets::CONTROL_H)).clicked() {
                     save = true;
                 }
-                if widgets::secondary(ui, t, "", "Cancel", vec2(88.0, widgets::CONTROL_H)).clicked() {
+                if widgets::secondary(ui, t, "", tr!("Cancel"), vec2(88.0, widgets::CONTROL_H)).clicked() {
                     cancel = true;
                 }
             });
@@ -1341,26 +1344,26 @@ impl HauntApp {
             let key_path = ed.key_path.trim().trim_matches('"').to_string();
             let port = ed.port.trim().parse::<u16>().ok().filter(|p| *p > 0);
             ed.error = if ed.server.host.is_empty() {
-                Some("Host is required.".into())
+                Some(tr!("Host is required.").into())
             } else if ed.server.host.contains(char::is_whitespace) {
-                Some("Host must not contain spaces.".into())
+                Some(tr!("Host must not contain spaces.").into())
             } else if port.is_none() {
-                Some("Port must be a number from 1 to 65535.".into())
+                Some(tr!("Port must be a number from 1 to 65535.").into())
             } else if ed.server.user.is_empty() {
-                Some("User is required.".into())
+                Some(tr!("User is required.").into())
             } else if ed.use_key && key_path.is_empty() {
-                Some("Choose a key file.".into())
+                Some(tr!("Choose a key file.").into())
             } else if ed.use_key && !PathBuf::from(&key_path).is_file() {
-                Some("Key file not found.".into())
+                Some(tr!("Key file not found.").into())
             } else if matches!(ed.proxy_kind, 1 | 2) && ed.proxy_host.trim().is_empty() {
-                Some("Proxy host is required.".into())
+                Some(tr!("Proxy host is required.").into())
             } else if matches!(ed.proxy_kind, 1 | 2)
                 && !ed.proxy_port.trim().is_empty()
                 && ed.proxy_port.trim().parse::<u16>().ok().filter(|p| *p > 0).is_none()
             {
-                Some("Proxy port must be a number from 1 to 65535.".into())
+                Some(tr!("Proxy port must be a number from 1 to 65535.").into())
             } else if ed.proxy_kind == 3 && ed.jump.is_none() {
-                Some("Pick a jump server.".into())
+                Some(tr!("Pick a jump server.").into())
             } else {
                 None
             };
@@ -1383,13 +1386,13 @@ impl HauntApp {
             self.editor = None;
             if !secret.is_empty()
                 && let Err(e) = secrets::set(server.id, &secret) {
-                    self.notify(ctx, format!("could not store the secret: {e}"), true);
+                    self.notify(ctx, tr!("Could not store the secret: {e}", e = e), true);
                 }
             if !proxy_auth {
                 secrets::delete_proxy(server.id);
             } else if !proxy_secret.is_empty()
                 && let Err(e) = secrets::set_proxy(server.id, &proxy_secret) {
-                    self.notify(ctx, format!("could not store the proxy password: {e}"), true);
+                    self.notify(ctx, tr!("Could not store the proxy password: {e}", e = e), true);
                 }
             match self.cfg.servers.iter_mut().find(|s| s.id == server.id) {
                 Some(existing) => *existing = server.clone(),
@@ -1419,14 +1422,14 @@ impl HauntApp {
         let opened = self.opened_at("delete", now);
         let mut result = None;
         let (_, dismissed) = widgets::dialog(ctx, t, Id::unique("delete"), opened, 360.0, |ui| {
-            dialog_header(ui, t, icon::TRASH, &format!("Delete “{name}”?"));
-            ui.label(RichText::new("The server and its saved secret are removed.").color(t.subtext));
+            dialog_header(ui, t, icon::TRASH, &tr!("Delete “{name}”?", name = name));
+            ui.label(RichText::new(tr!("The server and its saved secret are removed.")).color(t.subtext));
             ui.add_space(14.0);
             ui.horizontal(|ui| {
-                if widgets::danger(ui, t, "Delete", vec2(110.0, 36.0)).clicked() {
+                if widgets::danger(ui, t, tr!("Delete"), vec2(110.0, 36.0)).clicked() {
                     result = Some(true);
                 }
-                if widgets::secondary(ui, t, "", "Cancel", vec2(100.0, 36.0)).clicked() {
+                if widgets::secondary(ui, t, "", tr!("Cancel"), vec2(100.0, 36.0)).clicked() {
                     result = Some(false);
                 }
             });
@@ -1457,16 +1460,51 @@ impl HauntApp {
         let max_h = (ctx.content_rect().height() - 160.0).clamp(240.0, 620.0);
         let (_, dismissed) = widgets::dialog(ctx, t, Id::unique("settings"), opened, 560.0, |ui| {
             ui.horizontal(|ui| {
-                dialog_header(ui, t, icon::SLIDERS, "Settings");
+                dialog_header(ui, t, icon::SLIDERS, tr!("Settings"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if widgets::icon_button(ui, t, icon::XMARK, vec2(30.0, 28.0), false).clicked() {
                         close = true;
                     }
                 });
             });
-            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            #[allow(unused_mut)]
+            let mut scroll = egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]);
+            // Debug builds: HAUNT_PREVIEW_SCROLL=<px> pins the settings scroll for screenshot checks.
+            #[cfg(debug_assertions)]
+            if let Some(y) = std::env::var("HAUNT_PREVIEW_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+                scroll = scroll.vertical_scroll_offset(y);
+            }
+            scroll.show(ui, |ui| {
                 ui.set_width(ui.available_width() - 10.0);
-                widgets::section(ui, t, icon::BRUSH, "Theme");
+                widgets::section(ui, t, icon::GLOBE, tr!("Language"));
+                {
+                    let w = ui.available_width();
+                    let cols = 3;
+                    let gap = 8.0;
+                    let cw = ((w - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+                    let system = tr!("System ({lang})", lang = crate::i18n::system().native_name());
+                    let mut options: Vec<(String, String)> = vec![(String::new(), system)];
+                    options.extend(crate::i18n::Lang::ALL.iter().map(|l| (l.code().to_string(), l.native_name().to_string())));
+                    let mut picked = None;
+                    for chunk in options.chunks(cols) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for (code, name) in chunk {
+                                let selected = self.cfg.settings.language == *code;
+                                if widgets::option_tile(ui, t, selected, name, vec2(cw, widgets::CONTROL_H)).clicked() {
+                                    picked = Some(code.clone());
+                                }
+                            }
+                        });
+                        ui.add_space(gap - ui.spacing().item_spacing.y);
+                    }
+                    if let Some(code) = picked {
+                        self.cfg.settings.language = code;
+                        crate::i18n::set(&self.cfg.settings.language);
+                    }
+                }
+
+                widgets::section(ui, t, icon::BRUSH, tr!("Theme"));
                 let w = ui.available_width();
                 let cols = 3;
                 let gap = 10.0;
@@ -1487,60 +1525,60 @@ impl HauntApp {
                 }
 
                 let s = &mut self.cfg.settings;
-                widgets::section(ui, t, icon::GHOST, "Window");
-                slider(ui, t, "Opacity", &mut s.opacity, 0.3..=1.0, 0.01, "");
-                widgets::toggle(ui, t, &mut s.blur, "Acrylic blur", "Blur the desktop behind the window");
-                widgets::toggle(ui, t, &mut s.animated_background, "Animated sky", "Drifting fog and twinkling stars");
-                widgets::toggle(ui, t, &mut s.winter_snow, "Winter snow", "Falls from December to February, by your PC's date");
-                widgets::toggle(ui, t, &mut s.border_animation, "Animated border", "Rotating gradient around the active pane");
-                widgets::toggle(ui, t, &mut s.animations, "Animations", "Turn off for a static, minimal UI");
-                widgets::toggle(ui, t, &mut s.streamer_mode, "Streamer mode", "Mask IPs, hosts and tokens from screen capture (OBS, Discord)");
+                widgets::section(ui, t, icon::GHOST, tr!("Window"));
+                slider(ui, t, tr!("Opacity"), &mut s.opacity, 0.3..=1.0, 0.01, "");
+                widgets::toggle(ui, t, &mut s.blur, tr!("Acrylic blur"), tr!("Blur the desktop behind the window"));
+                widgets::toggle(ui, t, &mut s.animated_background, tr!("Animated sky"), tr!("Drifting fog and twinkling stars"));
+                widgets::toggle(ui, t, &mut s.winter_snow, tr!("Winter snow"), tr!("Falls from December to February, by your PC's date"));
+                widgets::toggle(ui, t, &mut s.border_animation, tr!("Animated border"), tr!("Rotating gradient around the active pane"));
+                widgets::toggle(ui, t, &mut s.animations, tr!("Animations"), tr!("Turn off for a static, minimal UI"));
+                widgets::toggle(ui, t, &mut s.streamer_mode, tr!("Streamer mode"), tr!("Mask IPs, hosts and tokens from screen capture (OBS, Discord)"));
 
-                widgets::section(ui, t, icon::TERMINAL, "Terminal");
-                slider(ui, t, "Font size", &mut s.font_size, 9.0..=28.0, 0.5, "pt");
-                slider(ui, t, "Line height", &mut s.line_height, 1.0..=1.8, 0.05, "");
+                widgets::section(ui, t, icon::TERMINAL, tr!("Terminal"));
+                slider(ui, t, tr!("Font size"), &mut s.font_size, 9.0..=28.0, 0.5, "pt");
+                slider(ui, t, tr!("Line height"), &mut s.line_height, 1.0..=1.8, 0.05, "");
                 ui.add_space(4.0);
-                ui.label(RichText::new("Cursor").size(12.0).color(t.subtext));
+                ui.label(RichText::new(tr!("Cursor")).size(12.0).color(t.subtext));
                 let mut cur = match s.cursor {
                     CursorStyle::Block => 0,
                     CursorStyle::Beam => 1,
                     CursorStyle::Underline => 2,
                 };
-                if widgets::segmented(ui, t, Id::unique("cursor-seg"), &mut cur, &["Block", "Beam", "Underline"]).changed() {
+                if widgets::segmented(ui, t, Id::unique("cursor-seg"), &mut cur, &[tr!("Block"), tr!("Beam"), tr!("Underline")]).changed() {
                     s.cursor = [CursorStyle::Block, CursorStyle::Beam, CursorStyle::Underline][cur];
                 }
                 ui.add_space(4.0);
-                widgets::toggle(ui, t, &mut s.cursor_blink, "Cursor blink", "Smooth fade, stops after 15 s idle");
-                widgets::toggle(ui, t, &mut s.cursor_trail, "Cursor trail", "The cursor glides between cells");
-                widgets::toggle(ui, t, &mut s.bold_is_bright, "Bold is bright", "Bold text uses the bright palette");
+                widgets::toggle(ui, t, &mut s.cursor_blink, tr!("Cursor blink"), tr!("Smooth fade, stops after 15 s idle"));
+                widgets::toggle(ui, t, &mut s.cursor_trail, tr!("Cursor trail"), tr!("The cursor glides between cells"));
+                widgets::toggle(ui, t, &mut s.bold_is_bright, tr!("Bold is bright"), tr!("Bold text uses the bright palette"));
                 let mut sb = s.scrollback as f32;
-                slider(ui, t, "Scrollback", &mut sb, 1000.0..=100_000.0, 1000.0, "lines, new tabs");
+                slider(ui, t, tr!("Scrollback"), &mut sb, 1000.0..=100_000.0, 1000.0, tr!("lines, new tabs"));
                 s.scrollback = sb as usize;
 
-                widgets::section(ui, t, icon::SLIDERS, "Layout");
-                slider(ui, t, "Gaps", &mut s.gaps, 0.0..=24.0, 1.0, "px");
-                slider(ui, t, "Padding", &mut s.padding, 0.0..=40.0, 1.0, "px");
-                slider(ui, t, "Corner radius", &mut s.rounding, 0.0..=24.0, 1.0, "px");
-                slider(ui, t, "Border width", &mut s.border_width, 0.0..=4.0, 0.5, "px");
-                slider(ui, t, "Sidebar width", &mut s.sidebar_width, 200.0..=420.0, 5.0, "px");
+                widgets::section(ui, t, icon::SLIDERS, tr!("Layout"));
+                slider(ui, t, tr!("Gaps"), &mut s.gaps, 0.0..=24.0, 1.0, "px");
+                slider(ui, t, tr!("Padding"), &mut s.padding, 0.0..=40.0, 1.0, "px");
+                slider(ui, t, tr!("Corner radius"), &mut s.rounding, 0.0..=24.0, 1.0, "px");
+                slider(ui, t, tr!("Border width"), &mut s.border_width, 0.0..=4.0, 0.5, "px");
+                slider(ui, t, tr!("Sidebar width"), &mut s.sidebar_width, 200.0..=420.0, 5.0, "px");
 
-                widgets::section(ui, t, icon::PLUG, "Behaviour");
-                widgets::toggle(ui, t, &mut s.copy_on_select, "Copy on select", "");
-                widgets::toggle(ui, t, &mut s.right_click_paste, "Right click pastes", "Copies instead when text is selected");
-                widgets::toggle(ui, t, &mut s.auto_reconnect, "Reconnect automatically", "When a working connection drops, try again with growing pauses");
+                widgets::section(ui, t, icon::PLUG, tr!("Behaviour"));
+                widgets::toggle(ui, t, &mut s.copy_on_select, tr!("Copy on select"), "");
+                widgets::toggle(ui, t, &mut s.right_click_paste, tr!("Right click pastes"), tr!("Copies instead when text is selected"));
+                widgets::toggle(ui, t, &mut s.auto_reconnect, tr!("Reconnect automatically"), tr!("When a working connection drops, try again with growing pauses"));
                 let mut ka = s.keepalive_secs as f32;
-                slider(ui, t, "Keepalive", &mut ka, 0.0..=120.0, 5.0, "s, 0 = off");
+                slider(ui, t, tr!("Keepalive"), &mut ka, 0.0..=120.0, 5.0, tr!("s, 0 = off"));
                 s.keepalive_secs = ka as u64;
 
-                widgets::section(ui, t, icon::FOLDER, "Import");
-                ui.label(RichText::new("Adds sessions that are not saved yet. Passwords are never imported.").size(12.0).color(t.subtext));
+                widgets::section(ui, t, icon::FOLDER, tr!("Import"));
+                ui.label(RichText::new(tr!("Adds sessions that are not saved yet. Passwords are never imported.")).size(12.0).color(t.subtext));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if widgets::secondary(ui, t, icon::TERMINAL, "From PuTTY", vec2(150.0, 34.0)).clicked() {
+                    if widgets::secondary(ui, t, icon::TERMINAL, tr!("From PuTTY"), vec2(150.0, 34.0)).clicked() {
                         import = Some(ImportSource::Putty);
                     }
                     ui.add_space(6.0);
-                    if widgets::secondary(ui, t, icon::KEY, "From ~/.ssh/config", vec2(190.0, 34.0)).clicked() {
+                    if widgets::secondary(ui, t, icon::KEY, tr!("From ~/.ssh/config"), vec2(190.0, 34.0)).clicked() {
                         import = Some(ImportSource::SshConfig);
                     }
                 });
@@ -1591,7 +1629,7 @@ impl HauntApp {
 
         let (_, dismissed) = widgets::dialog(ctx, t, Id::unique("launcher"), opened, 560.0, |ui| {
             let before = l.query.clone();
-            let r = widgets::input(ui, t, &mut l.query, "Connect to…  name, host or user@host:port", false, icon::SEARCH);
+            let r = widgets::input(ui, t, &mut l.query, tr!("Connect to…  name, host or user@host:port"), false, icon::SEARCH);
             r.request_focus();
             if l.query != before {
                 l.selected = 0;
@@ -1631,12 +1669,12 @@ impl HauntApp {
                             status_color(t, states.get(&s.id)).unwrap_or(t.accent),
                         ),
                         LaunchItem::Quick { user, host, port } => {
-                            (icon::BOLT.to_string(), format!("Quick connect {user}@{host}"), format!("port {port}, password auth, not saved"), t.warn)
+                            (icon::BOLT.to_string(), tr!("Quick connect {target}", target = format!("{user}@{host}")), tr!("port {port}, password login, not saved", port = port), t.warn)
                         }
-                        LaunchItem::NewServer => (icon::PLUS.to_string(), "New server".into(), "Ctrl+Shift+N".into(), t.ok),
-                        LaunchItem::Settings => (icon::GEAR.to_string(), "Settings".into(), "Ctrl+,".into(), t.subtext),
-                        LaunchItem::Import(ImportSource::Putty) => (icon::FOLDER.to_string(), "Import from PuTTY".into(), "saved sessions in the registry".into(), t.subtext),
-                        LaunchItem::Import(ImportSource::SshConfig) => (icon::FOLDER.to_string(), "Import from ~/.ssh/config".into(), "Host blocks".into(), t.subtext),
+                        LaunchItem::NewServer => (icon::PLUS.to_string(), tr!("New server").into(), "Ctrl+Shift+N".into(), t.ok),
+                        LaunchItem::Settings => (icon::GEAR.to_string(), tr!("Settings").into(), "Ctrl+,".into(), t.subtext),
+                        LaunchItem::Import(ImportSource::Putty) => (icon::FOLDER.to_string(), tr!("Import from PuTTY").into(), tr!("saved sessions in the registry").into(), t.subtext),
+                        LaunchItem::Import(ImportSource::SshConfig) => (icon::FOLDER.to_string(), tr!("Import from ~/.ssh/config").into(), tr!("Host blocks").into(), t.subtext),
                     };
                     let active = k == l.selected;
                     let cy = row.center().y;
@@ -1654,14 +1692,14 @@ impl HauntApp {
                     }
                 }
             } else {
-                ui.label(RichText::new("No matches. Type user@host to connect without saving.").color(t.subtext));
+                ui.label(RichText::new(tr!("No matches. Type user@host to connect without saving.")).color(t.subtext));
             }
             ui.add_space(8.0);
             let (fr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
             let fp = ui.painter();
             let line = Color32::from_white_alpha(18);
             let mut x = fr.min.x + 2.0;
-            for (keys, label) in [(&["↑", "↓"][..], "select"), (&["Enter"][..], "connect"), (&["Esc"][..], "close")] {
+            for (keys, label) in [(&["↑", "↓"][..], tr!("select")), (&["Enter"][..], tr!("connect")), (&["Esc"][..], tr!("close"))] {
                 for k in keys {
                     x += fx::kbd(fp, pos2(x, fr.center().y), k, t.subtext, line) + 4.0;
                 }
@@ -1823,7 +1861,7 @@ impl eframe::App for HauntApp {
             self.blur_wanted = self.cfg.settings.blur;
             self.blur_active = platform::set_blur(frame, self.blur_wanted);
             if self.blur_wanted && !self.blur_active {
-                self.notify(&ctx, "Acrylic needs Windows 11 22H2 or newer.", true);
+                self.notify(&ctx, tr!("Acrylic needs Windows 11 22H2 or newer."), true);
             }
         }
 
@@ -2015,11 +2053,32 @@ fn two_cols_px(ui: &mut egui::Ui, lw: f32, rw: f32, left: impl FnOnce(&mut egui:
 }
 
 fn slider(ui: &mut egui::Ui, t: &Theme, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, unit: &str) {
+    // One label column for every slider, as wide as the longest label in this language,
+    // so the tracks start in line and no translation runs under a track.
+    let labels = [
+        tr!("Opacity"),
+        tr!("Font size"),
+        tr!("Line height"),
+        tr!("Scrollback"),
+        tr!("Gaps"),
+        tr!("Padding"),
+        tr!("Corner radius"),
+        tr!("Border width"),
+        tr!("Sidebar width"),
+        tr!("Keepalive"),
+    ];
+    let measure = |s: &str, font: egui::FontId| ui.painter().layout_no_wrap(s.to_owned(), font, t.text).size().x;
+    let label_w = labels.iter().map(|l| measure(l, fonts::ui(13.5))).fold(130.0_f32, |a, b| a.max(b + 16.0));
+    let unit_w = if unit.is_empty() { 0.0 } else { measure(unit, egui::FontId::proportional(11.0)) };
+    let decimals = if step >= 1.0 { 0 } else if step >= 0.1 { 1 } else { 2 };
     ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(130.0, 28.0), Sense::hover());
+        let gap = ui.spacing().item_spacing.x;
+        let (r, _) = ui.allocate_exact_size(vec2(label_w, 28.0), Sense::hover());
         ui.painter().text(pos2(r.min.x, r.center().y), Align2::LEFT_CENTER, label, fonts::ui(13.5), t.text);
-        ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
-        ui.add(egui::Slider::new(v, range).step_by(step).show_value(true).trailing_fill(true));
+        // Room for the value box (~64 px) and the unit, so the row never widens the dialog.
+        let tail = gap + 64.0 + if unit.is_empty() { 0.0 } else { gap + unit_w };
+        ui.spacing_mut().slider_width = (ui.available_width() - tail).max(80.0);
+        ui.add(egui::Slider::new(v, range).step_by(step).fixed_decimals(decimals).show_value(true).trailing_fill(true));
         if !unit.is_empty() {
             ui.label(RichText::new(unit).size(11.0).color(t.subtext));
         }
@@ -2068,16 +2127,16 @@ fn launcher_items(servers: &[Server], query: &str) -> Vec<LaunchItem> {
             items.insert(0, LaunchItem::Quick { user, host, port });
         }
     }
-    if q.is_empty() || "new server".contains(&q) {
+    if q.is_empty() || "new server".contains(&q) || tr!("New server").to_lowercase().contains(&q) {
         items.push(LaunchItem::NewServer);
     }
-    if q.is_empty() || "settings".contains(&q) {
+    if q.is_empty() || "settings".contains(&q) || tr!("Settings").to_lowercase().contains(&q) {
         items.push(LaunchItem::Settings);
     }
-    if !q.is_empty() && ("import putty".contains(&q) || q.starts_with("imp")) {
+    if !q.is_empty() && ("import putty".contains(&q) || q.starts_with("imp") || tr!("Import from PuTTY").to_lowercase().contains(&q)) {
         items.push(LaunchItem::Import(ImportSource::Putty));
     }
-    if !q.is_empty() && ("import ssh config".contains(&q) || q.starts_with("imp")) {
+    if !q.is_empty() && ("import ssh config".contains(&q) || q.starts_with("imp") || tr!("Import from ~/.ssh/config").to_lowercase().contains(&q)) {
         items.push(LaunchItem::Import(ImportSource::SshConfig));
     }
     items
@@ -2114,10 +2173,10 @@ fn route_label(s: &Server, all: &[Server]) -> Option<String> {
     match &s.proxy {
         Proxy::None => None,
         Proxy::Socks5 { .. } => Some("socks5".into()),
-        Proxy::Http { .. } => Some("http proxy".into()),
+        Proxy::Http { .. } => Some(tr!("http proxy").into()),
         Proxy::Jump { server } => Some(match all.iter().find(|x| x.id == *server) {
-            Some(j) => format!("via {}", j.display_name()),
-            None => "jump host missing".into(),
+            Some(j) => tr!("via {name}", name = j.display_name()),
+            None => tr!("jump host missing").into(),
         }),
     }
 }
@@ -2125,11 +2184,11 @@ fn route_label(s: &Server, all: &[Server]) -> Option<String> {
 /// "now", "5m", "3h", "2d", "6w".
 fn ago(secs: u64) -> String {
     match secs {
-        0..60 => "now".into(),
-        60..3600 => format!("{}m", secs / 60),
-        3600..86400 => format!("{}h", secs / 3600),
-        86400..1_209_600 => format!("{}d", secs / 86400),
-        _ => format!("{}w", secs / 604_800),
+        0..60 => tr!("now").into(),
+        60..3600 => tr!("{n}m", n = secs / 60),
+        3600..86400 => tr!("{n}h", n = secs / 3600),
+        86400..1_209_600 => tr!("{n}d", n = secs / 86400),
+        _ => tr!("{n}w", n = secs / 604_800),
     }
 }
 
@@ -2181,9 +2240,9 @@ fn server_row(ui: &mut egui::Ui, t: &Theme, s: &Server, st: Option<&Status>, rou
     veil::text(&tp, pos2(tx, cy + 9.0 + fx::text_dy(&p, &mf)), Align2::LEFT_CENTER, address(s), mf, t.subtext, t.mantle);
 
     // A route marker when the server goes through a proxy or jump host (fades for the actions).
-    if let Some(r) = route {
+    if route.is_some() {
         let c = pos2(rect.max.x - 18.0, cy);
-        let ic = if r.starts_with("via") { icon::ROUTE } else { icon::GLOBE };
+        let ic = if matches!(s.proxy, Proxy::Jump { .. }) { icon::ROUTE } else { icon::GLOBE };
         fx::glyph(&p, c, ic, fonts::mono(11.0), t.accent.gamma_multiply(0.75 * (1.0 - h)));
     }
 

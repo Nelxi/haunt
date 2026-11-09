@@ -29,6 +29,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::tr;
+
 use crate::config::{self, Auth, Proxy, Server};
 use crate::secrets;
 
@@ -157,11 +159,11 @@ impl ConnectSpec {
                 Some(Via::Http { host: host.trim().into(), port: *port, user: user.trim().into() })
             }
             Proxy::Jump { server } => Some(if seen.contains(server) {
-                Via::Broken(format!("jump host loop at {}", s.display_name()))
+                Via::Broken(tr!("jump host loop at {name}", name = s.display_name()))
             } else if let Some(j) = all.iter().find(|x| x.id == *server) {
                 Via::Jump(Self::resolve(j, all, keepalive_secs, seen))
             } else {
-                Via::Broken(format!("the jump server of {} was deleted", s.display_name()))
+                Via::Broken(tr!("the jump server of {name} was deleted", name = s.display_name()))
             }),
         };
         Self {
@@ -385,9 +387,9 @@ const BACKOFF: [u64; 7] = [1, 2, 4, 8, 15, 30, 60];
 fn lost_reason(e: &anyhow::Error, keepalive: Duration) -> String {
     match e.downcast_ref::<russh::Error>() {
         Some(russh::Error::KeepaliveTimeout) => {
-            format!("connection lost: the server stopped answering ({} s without a reply)", keepalive.as_secs() * 3)
+            tr!("connection lost: the server stopped answering ({n} s without a reply)", n = keepalive.as_secs() * 3)
         }
-        Some(russh::Error::HUP) | Some(russh::Error::Disconnect) => "connection lost: the server closed it".into(),
+        Some(russh::Error::HUP) | Some(russh::Error::Disconnect) => tr!("connection lost: the server closed it").into(),
         Some(russh::Error::IO(io))
             if matches!(
                 io.kind(),
@@ -397,10 +399,10 @@ fn lost_reason(e: &anyhow::Error, keepalive: Duration) -> String {
                     | std::io::ErrorKind::BrokenPipe
             ) =>
         {
-            "connection lost: the network connection was cut".into()
+            tr!("connection lost: the network connection was cut").into()
         }
-        Some(russh::Error::IO(io)) => format!("connection lost: {io}"),
-        _ => format!("connection lost: {e:#}"),
+        Some(russh::Error::IO(io)) => tr!("connection lost: {e}", e = io),
+        _ => tr!("connection lost: {e}", e = format!("{e:#}")),
     }
 }
 
@@ -410,11 +412,11 @@ impl Task {
         let mut failures = 0usize;
         loop {
             let route = self.spec.route();
-            self.out.info(&if was_connected { format!("reconnecting to {route} …") } else { format!("connecting to {route} …") });
+            self.out.info(&if was_connected { tr!("reconnecting to {route} …", route = route) } else { tr!("connecting to {route} …", route = route) });
             self.authenticating = false;
             let (reason, retry) = match self.session(&mut rx, &mut was_connected).await {
                 Ok(End::Closed) => {
-                    self.finish("session closed".into());
+                    self.finish(tr!("session closed").into());
                     return;
                 }
                 Ok(End::Exited(reason)) => {
@@ -460,7 +462,7 @@ impl Task {
             sh.status = Status::Reconnecting(at);
             sh.prompt = None;
         }
-        self.out.info(&format!("reconnecting in {secs} s  ·  Enter to retry now"));
+        self.out.info(&tr!("reconnecting in {n} s  ·  Enter to retry now", n = secs));
         let deadline = tokio::time::Instant::from_std(at);
         loop {
             // Tick once a second so the countdown on screen stays current.
@@ -484,22 +486,22 @@ impl Task {
     async fn session(&mut self, rx: &mut mpsc::UnboundedReceiver<Input>, was_connected: &mut bool) -> Result<End> {
         let spec = self.spec.clone();
         if spec.host.is_empty() {
-            bail!("no host set");
+            bail!("{}", tr!("no host set"));
         }
 
         // Jump hosts stay alive as long as the session: its traffic runs through them.
         let mut hops = Vec::new();
         let mut handle = self.open(&spec, &mut hops).await?;
 
-        let channel = handle.channel_open_session().await.context("cannot open a session channel")?;
+        let channel = handle.channel_open_session().await.context(tr!("cannot open a session channel"))?;
         let size = self.shared.lock().size;
         channel
             .request_pty(false, "xterm-256color", size.cols as u32, size.rows as u32, 0, 0, &[])
             .await
-            .context("PTY request failed")?;
+            .context(tr!("PTY request failed"))?;
         // Most servers drop env requests (AcceptEnv); harmless when they do.
         let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
-        channel.request_shell(false).await.context("shell request failed")?;
+        channel.request_shell(false).await.context(tr!("shell request failed"))?;
 
         // The grid may have been resized while we were offline.
         let now = self.shared.lock().size;
@@ -548,15 +550,15 @@ impl Task {
             let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
             close_hops(hops).await;
             return Ok(End::Exited(match exit_status {
-                Some(0) | None => "session ended".into(),
-                Some(code) => format!("session ended (exit status {code})"),
+                Some(0) | None => tr!("session ended").into(),
+                Some(code) => tr!("session ended (exit status {code})", code = code),
             }));
         }
         // The channel vanished without a goodbye: the SSH session itself is over. Its
         // result says why (keepalive timeout, reset, ...).
         let reason = match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
             Ok(Err(e)) => lost_reason(&e, spec.keepalive),
-            _ => "connection lost".into(),
+            _ => tr!("connection lost").into(),
         };
         close_hops(hops).await;
         Ok(End::Lost(reason))
@@ -571,38 +573,38 @@ impl Task {
     ) -> Pin<Box<dyn Future<Output = Result<client::Handle<HostKeyCheck>>> + Send + 'a>> {
         Box::pin(async move {
             if spec.host.is_empty() {
-                bail!("no host set");
+                bail!("{}", tr!("no host set"));
             }
             let stream: Box<dyn Io> = match spec.via.as_deref() {
                 None => Box::new(tcp(&spec.host, spec.port).await?),
                 Some(Via::Broken(why)) => bail!("{why}"),
                 Some(Via::Socks5 { host, port, user }) => {
-                    self.out.info(&format!("via socks5 {host}:{port}"));
+                    self.out.info(&tr!("via SOCKS5 proxy {addr}", addr = format!("{host}:{port}")));
                     let pass = self.proxy_password(spec, user, host, *port).await?;
                     let mut s = tcp(host, *port).await?;
                     socks5(&mut s, &spec.host, spec.port, user, pass.as_ref().map(|p| p.0.as_str()))
                         .await
-                        .with_context(|| format!("SOCKS5 proxy {host}:{port}"))?;
+                        .with_context(|| tr!("SOCKS5 proxy {addr}", addr = format!("{host}:{port}")))?;
                     self.remember_proxy(spec, user, host, *port, pass);
                     Box::new(s)
                 }
                 Some(Via::Http { host, port, user }) => {
-                    self.out.info(&format!("via http proxy {host}:{port}"));
+                    self.out.info(&tr!("via HTTP proxy {addr}", addr = format!("{host}:{port}")));
                     let pass = self.proxy_password(spec, user, host, *port).await?;
                     let mut s = tcp(host, *port).await?;
                     http_connect(&mut s, &spec.host, spec.port, user, pass.as_ref().map(|p| p.0.as_str()))
                         .await
-                        .with_context(|| format!("HTTP proxy {host}:{port}"))?;
+                        .with_context(|| tr!("HTTP proxy {addr}", addr = format!("{host}:{port}")))?;
                     self.remember_proxy(spec, user, host, *port, pass);
                     Box::new(s)
                 }
                 Some(Via::Jump(j)) => {
                     let jh = self.open(j, hops).await?;
-                    self.out.info(&format!("jump {} → {}:{}", j.host, spec.host, spec.port));
+                    self.out.info(&tr!("through {jump} → {target}", jump = j.host, target = format!("{}:{}", spec.host, spec.port)));
                     let ch = jh
                         .channel_open_direct_tcpip(spec.host.clone(), spec.port as u32, "127.0.0.1", 0)
                         .await
-                        .with_context(|| format!("{} refused to forward to {}:{}", j.host, spec.host, spec.port))?;
+                        .with_context(|| tr!("{jump} refused to forward to {target}", jump = j.host, target = format!("{}:{}", spec.host, spec.port)))?;
                     hops.push(jh);
                     Box::new(ch.into_stream())
                 }
@@ -623,7 +625,7 @@ impl Task {
             };
             let mut handle = client::connect_stream(config, stream, handler)
                 .await
-                .with_context(|| format!("SSH handshake with {} failed", spec.host))?;
+                .with_context(|| tr!("SSH handshake with {host} failed", host = spec.host))?;
             self.authenticating = true;
             self.authenticate(&mut handle, spec).await?;
             self.authenticating = false;
@@ -642,11 +644,11 @@ impl Task {
         if let Some(p) = spec.server_id.and_then(secrets::get_proxy) {
             return Ok(Some((p, false)));
         }
-        let msg = format!("Proxy password for {user}@{host}:{port}");
+        let msg = tr!("Proxy password for {target}", target = format!("{user}@{host}:{port}"));
         let r = self
-            .ask(PromptKind::Password, "Proxy password", &msg)
+            .ask(PromptKind::Password, tr!("Proxy password"), &msg)
             .await
-            .ok_or_else(|| anyhow!("authentication cancelled"))?;
+            .ok_or_else(|| anyhow!("{}", tr!("authentication cancelled")))?;
         Ok(Some(r))
     }
 
@@ -656,7 +658,7 @@ impl Task {
         }
         if let (Some((p, true)), Some(id)) = (pass, spec.server_id)
             && let Err(e) = secrets::set_proxy(id, &p) {
-                self.out.error(&format!("could not save the proxy password: {e}"));
+                self.out.error(&tr!("could not save the proxy password: {e}", e = e));
             }
     }
 
@@ -670,7 +672,7 @@ impl Task {
                     .authenticate_publickey(&spec.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                     .await?;
                 if !res.success() {
-                    bail!("the server rejected key {} for user {}", path.display(), spec.user);
+                    bail!("{}", tr!("the server rejected key {path} for user {user}", path = path.display(), user = spec.user));
                 }
                 Ok(())
             }
@@ -683,13 +685,13 @@ impl Task {
                         Some(p) => (p, false),
                         None => {
                             let msg = if attempt == 0 {
-                                format!("Password for {}@{}", spec.user, spec.host)
+                                tr!("Password for {target}", target = format!("{}@{}", spec.user, spec.host))
                             } else {
-                                "Wrong password, try again".to_string()
+                                tr!("Wrong password, try again").to_string()
                             };
-                            self.ask(PromptKind::Password, "Password", &msg)
+                            self.ask(PromptKind::Password, tr!("Password"), &msg)
                                 .await
-                                .ok_or_else(|| anyhow!("authentication cancelled"))?
+                                .ok_or_else(|| anyhow!("{}", tr!("authentication cancelled")))?
                         }
                     };
                     let res = handle.authenticate_password(&spec.user, &password).await?;
@@ -698,15 +700,15 @@ impl Task {
                         if remember
                             && let Some(id) = spec.server_id
                                 && let Err(e) = secrets::set(id, &password) {
-                                    self.out.error(&format!("could not save the password: {e}"));
+                                    self.out.error(&tr!("could not save the password: {e}", e = e));
                                 }
                         return Ok(());
                     }
                     if from_store {
-                        self.out.info("saved password was rejected");
+                        self.out.info(tr!("saved password was rejected"));
                     }
                 }
-                bail!("authentication failed")
+                bail!("{}", tr!("authentication failed"))
             }
         }
     }
@@ -715,7 +717,7 @@ impl Task {
     async fn load_key(&mut self, path: &PathBuf, server_id: Option<Uuid>) -> Result<ssh_key::PrivateKey> {
         let text = tokio::fs::read_to_string(path)
             .await
-            .with_context(|| format!("cannot read key file {}", path.display()))?;
+            .with_context(|| tr!("cannot read key file {path}", path = path.display()))?;
         let first_err = match russh::keys::decode_secret_key(&text, None) {
             Ok(k) => return Ok(k),
             Err(e) => e,
@@ -729,13 +731,13 @@ impl Task {
                 Some(p) => (p, false),
                 None => {
                     let msg = if attempt == 0 {
-                        format!("Passphrase for {}\n({first_err})", path.display())
+                        tr!("Passphrase for {path}\n({e})", path = path.display(), e = first_err)
                     } else {
-                        "Wrong passphrase, try again".to_string()
+                        tr!("Wrong passphrase, try again").to_string()
                     };
-                    match self.ask(PromptKind::Passphrase, "Key passphrase", &msg).await {
+                    match self.ask(PromptKind::Passphrase, tr!("Key passphrase"), &msg).await {
                         Some(r) => r,
-                        None => bail!("cannot load key {}: {first_err}", path.display()),
+                        None => bail!("{}", tr!("cannot load key {path}: {e}", path = path.display(), e = first_err)),
                     }
                 }
             };
@@ -748,7 +750,7 @@ impl Task {
                 return Ok(k);
             }
         }
-        bail!("cannot decrypt key {}", path.display())
+        bail!("{}", tr!("cannot decrypt key {path}", path = path.display()))
     }
 
     async fn ask(&self, kind: PromptKind, title: &str, message: &str) -> Option<(String, bool)> {
@@ -768,8 +770,8 @@ async fn close_hops(hops: Vec<client::Handle<HostKeyCheck>>) {
 async fn tcp(host: &str, port: u16) -> Result<TcpStream> {
     let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((host, port)))
         .await
-        .map_err(|_| anyhow!("connection to {host}:{port} timed out after 10 s"))?
-        .with_context(|| format!("cannot reach {host}:{port}"))?;
+        .map_err(|_| anyhow!("{}", tr!("connection to {addr} timed out after 10 s", addr = format!("{host}:{port}"))))?
+        .with_context(|| tr!("cannot reach {addr}", addr = format!("{host}:{port}")))?;
     stream.set_nodelay(true)?;
     Ok(stream)
 }
@@ -786,16 +788,16 @@ async fn socks5<S: AsyncRead + AsyncWrite + Unpin>(
     let with_auth = !user.is_empty();
     s.write_all(if with_auth { &[5, 2, 0, 2][..] } else { &[5, 1, 0][..] }).await?;
     let mut r = [0u8; 2];
-    s.read_exact(&mut r).await.context("no reply")?;
+    s.read_exact(&mut r).await.context(tr!("no reply"))?;
     if r[0] != 5 {
-        bail!("not a SOCKS5 proxy");
+        bail!("{}", tr!("not a SOCKS5 proxy"));
     }
     match r[1] {
         0 => {}
         2 if with_auth => {
             let pass = pass.unwrap_or("");
             if user.len() > 255 || pass.len() > 255 {
-                bail!("user or password longer than 255 bytes");
+                bail!("{}", tr!("user or password longer than 255 bytes"));
             }
             let mut m = vec![1, user.len() as u8];
             m.extend_from_slice(user.as_bytes());
@@ -804,14 +806,14 @@ async fn socks5<S: AsyncRead + AsyncWrite + Unpin>(
             s.write_all(&m).await?;
             s.read_exact(&mut r).await?;
             if r[1] != 0 {
-                bail!("wrong proxy user or password");
+                bail!("{}", tr!("wrong proxy user or password"));
             }
         }
-        0xff if !with_auth => bail!("the proxy wants a user and password"),
-        _ => bail!("the proxy accepts none of our auth methods"),
+        0xff if !with_auth => bail!("{}", tr!("the proxy wants a user and password")),
+        _ => bail!("{}", tr!("the proxy accepts none of our auth methods")),
     }
     if host.len() > 255 {
-        bail!("host name too long");
+        bail!("{}", tr!("host name too long"));
     }
     let mut m = vec![5, 1, 0, 3, host.len() as u8];
     m.extend_from_slice(host.as_bytes());
@@ -823,15 +825,15 @@ async fn socks5<S: AsyncRead + AsyncWrite + Unpin>(
         bail!(
             "{}",
             match head[1] {
-                1 => "general failure",
-                2 => "connection not allowed by ruleset",
-                3 => "network unreachable",
-                4 => "host unreachable",
-                5 => "connection refused",
-                6 => "TTL expired",
-                7 => "command not supported",
-                8 => "address type not supported",
-                _ => "unknown error",
+                1 => tr!("general failure"),
+                2 => tr!("connection not allowed by ruleset"),
+                3 => tr!("network unreachable"),
+                4 => tr!("host unreachable"),
+                5 => tr!("connection refused"),
+                6 => tr!("TTL expired"),
+                7 => tr!("command not supported"),
+                8 => tr!("address type not supported"),
+                _ => tr!("unknown error"),
             }
         );
     }
@@ -843,7 +845,7 @@ async fn socks5<S: AsyncRead + AsyncWrite + Unpin>(
             s.read_exact(&mut l).await?;
             l[0] as usize + 2
         }
-        _ => bail!("bad reply"),
+        _ => bail!("{}", tr!("bad reply")),
     };
     let mut rest = vec![0u8; skip];
     s.read_exact(&mut rest).await?;
@@ -871,16 +873,16 @@ async fn http_connect<S: AsyncRead + AsyncWrite + Unpin>(
     let mut b = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
         if head.len() > 16 * 1024 {
-            bail!("reply headers too long");
+            bail!("{}", tr!("reply headers too long"));
         }
-        s.read_exact(&mut b).await.context("the proxy closed the connection")?;
+        s.read_exact(&mut b).await.context(tr!("the proxy closed the connection"))?;
         head.push(b[0]);
     }
     let head = String::from_utf8_lossy(&head);
     let status = head.lines().next().unwrap_or("").trim();
     match status.split_whitespace().nth(1).unwrap_or("") {
         "200" => Ok(()),
-        "407" => bail!("proxy authentication required ({status})"),
+        "407" => bail!("{}", tr!("proxy authentication required ({status})", status = status)),
         _ => bail!("{status}"),
     }
 }
@@ -928,20 +930,18 @@ impl client::Handler for HostKeyCheck {
 
     async fn check_server_key(&mut self, server_key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let PublicKeyOrCertificate::PublicKey { key, .. } = server_key else {
-            bail!("the server presented a host certificate; certificate host keys are not supported yet");
+            bail!("{}", tr!("the server presented a host certificate; certificate host keys are not supported yet"));
         };
         let ours = config::known_hosts_path();
         let fingerprint = key.fingerprint(HashAlg::Sha256);
 
         let changed = |line: usize, file: &str| {
-            anyhow::Error::new(Fatal(format!(
-                "HOST KEY CHANGED for {}:{} (recorded in {file}, line {line}).\n\
-                 New key: {} {fingerprint}\n\
-                 This can mean someone is intercepting the connection. If the server was \
-                 reinstalled, remove the old line from that file and connect again.",
-                self.host,
-                self.port,
-                key.algorithm(),
+            anyhow::Error::new(Fatal(tr!(
+                "HOST KEY CHANGED for {addr} (recorded in {file}, line {line}).\nNew key: {key}\nThis can mean someone is intercepting the connection. If the server was reinstalled, remove the old line from that file and connect again.",
+                addr = format!("{}:{}", self.host, self.port),
+                file = file,
+                line = line,
+                key = format!("{} {fingerprint}", key.algorithm()),
             )))
         };
 
@@ -960,14 +960,13 @@ impl client::Handler for HostKeyCheck {
             _ => {}
         }
 
-        let message = format!(
-            "First connection to {}:{}.\n\nHost key fingerprint ({}):\n{fingerprint}\n\n\
-             Make sure it matches the server before trusting it.",
-            self.host,
-            self.port,
-            key.algorithm(),
+        let message = tr!(
+            "First connection to {addr}.\n\nHost key fingerprint ({algorithm}):\n{fingerprint}\n\nMake sure it matches the server before trusting it.",
+            addr = format!("{}:{}", self.host, self.port),
+            algorithm = key.algorithm(),
+            fingerprint = fingerprint,
         );
-        match ask(&self.shared, &self.ctx, PromptKind::HostKey, "Unknown host", &message).await {
+        match ask(&self.shared, &self.ctx, PromptKind::HostKey, tr!("Unknown host"), &message).await {
             Some(_) => {
                 if let Some(path) = &ours
                     && let Err(e) = russh::keys::known_hosts::learn_known_hosts_path(&self.host, self.port, key, path) {
@@ -975,7 +974,7 @@ impl client::Handler for HostKeyCheck {
                     }
                 Ok(true)
             }
-            None => Err(Fatal("host key not trusted, connection aborted".into()).into()),
+            None => Err(Fatal(tr!("host key not trusted, connection aborted").into()).into()),
         }
     }
 }

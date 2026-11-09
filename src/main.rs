@@ -6,6 +6,7 @@ mod app;
 mod config;
 mod fonts;
 mod fx;
+mod i18n;
 mod import;
 mod platform;
 mod secrets;

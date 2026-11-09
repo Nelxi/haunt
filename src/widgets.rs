@@ -32,7 +32,7 @@ fn cr(r: f32) -> CornerRadius {
 
 /// Accent-filled call to action: a light gradient from the top, a soft glow on hover.
 pub fn primary(ui: &mut Ui, t: &Theme, icon: &str, text: &str, size: egui::Vec2) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(fit(ui, icon, text, size), Sense::click());
     let h = hover_t(ui, &resp);
     let press = anim::toggle(ui.ctx(), resp.id.with("press"), resp.is_pointer_button_down_on(), 0.08);
     let rect = rect.shrink(press);
@@ -49,7 +49,7 @@ pub fn primary(ui: &mut Ui, t: &Theme, icon: &str, text: &str, size: egui::Vec2)
 
 /// Quiet secondary button: a translucent plate with a hairline edge.
 pub fn secondary(ui: &mut Ui, t: &Theme, icon: &str, text: &str, size: egui::Vec2) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(fit(ui, icon, text, size), Sense::click());
     let h = hover_t(ui, &resp);
     let p = ui.painter();
     p.rect_filled(rect, cr(RADIUS), Color32::from_white_alpha((6.0 + 8.0 * h) as u8));
@@ -67,7 +67,7 @@ pub fn secondary(ui: &mut Ui, t: &Theme, icon: &str, text: &str, size: egui::Vec
 
 /// Danger button (filled red).
 pub fn danger(ui: &mut Ui, t: &Theme, text: &str, size: egui::Vec2) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(fit(ui, "", text, size), Sense::click());
     let h = hover_t(ui, &resp);
     let p = ui.painter();
     if h > 0.0 {
@@ -80,6 +80,19 @@ pub fn danger(ui: &mut Ui, t: &Theme, text: &str, size: egui::Vec2) -> Response 
 }
 
 /// Icon + label centred as one group inside `rect`.
+/// Width a button needs for its icon and label (padding included); buttons never get
+/// narrower than this, so translated labels are not clipped.
+pub fn button_width(ui: &Ui, icon: &str, text: &str) -> f32 {
+    let g = ui.painter().layout_no_wrap(text.to_string(), fonts::bold(13.5), Color32::PLACEHOLDER);
+    let icon_box = if icon.is_empty() { 0.0 } else { 14.0 };
+    let gap = if icon.is_empty() || text.is_empty() { 0.0 } else { 8.0 };
+    (icon_box + gap + g.size().x + 40.0).ceil()
+}
+
+fn fit(ui: &Ui, icon: &str, text: &str, size: egui::Vec2) -> egui::Vec2 {
+    vec2(size.x.max(button_width(ui, icon, text)), size.y)
+}
+
 fn label_with_icon(p: &egui::Painter, rect: Rect, icon: &str, text: &str, color: Color32, strong: bool) {
     let font = if strong { fonts::bold(13.5) } else { fonts::medium(13.5) };
     let g = p.layout_no_wrap(text.to_string(), font.clone(), color);
@@ -113,7 +126,12 @@ pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, size: egui::Vec2, danger:
 /// Switch with a sliding knob; the label (and optional hint) on the left.
 pub fn toggle(ui: &mut Ui, t: &Theme, on: &mut bool, label: &str, hint: &str) -> Response {
     let w = ui.available_width();
-    let h = if hint.is_empty() { CONTROL_H } else { 48.0 };
+    // The hint wraps short of the switch; translations can be much longer than English.
+    let hint_galley = (!hint.is_empty()).then(|| ui.painter().layout(hint.to_owned(), fonts::ui(11.5), t.subtext, (w - 60.0).max(80.0)));
+    let h = match &hint_galley {
+        None => CONTROL_H,
+        Some(g) => (34.0 + g.size().y).max(48.0),
+    };
     let (rect, mut resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -125,11 +143,15 @@ pub fn toggle(ui: &mut Ui, t: &Theme, on: &mut bool, label: &str, hint: &str) ->
     if hov > 0.0 {
         p.rect_filled(rect.expand2(vec2(8.0, 0.0)), cr(10.0), Color32::from_white_alpha((7.0 * hov) as u8));
     }
-    if hint.is_empty() {
-        fx::text(p, pos2(rect.min.x, rect.center().y), Align2::LEFT_CENTER, label, fonts::ui(13.5), t.text);
-    } else {
-        fx::text(p, pos2(rect.min.x, rect.min.y + 16.0), Align2::LEFT_CENTER, label, fonts::ui(13.5), t.text);
-        fx::text(p, pos2(rect.min.x, rect.min.y + 34.0), Align2::LEFT_CENTER, hint, fonts::ui(11.5), t.subtext);
+    match hint_galley {
+        None => {
+            fx::text(p, pos2(rect.min.x, rect.center().y), Align2::LEFT_CENTER, label, fonts::ui(13.5), t.text);
+        }
+        Some(g) => {
+            fx::text(p, pos2(rect.min.x, rect.min.y + 16.0), Align2::LEFT_CENTER, label, fonts::ui(13.5), t.text);
+            let top = rect.min.y + 34.0 - g.rows.first().map_or(g.size().y, |r| r.height()) / 2.0;
+            p.galley(pos2(rect.min.x, top), g, t.subtext);
+        }
     }
     let track = Rect::from_center_size(pos2(rect.max.x - 20.0, rect.center().y), vec2(40.0, 24.0));
     p.rect_filled(track, cr(12.0), mix(Color32::from_rgb(0x2a, 0x26, 0x36), t.accent, k));
@@ -293,6 +315,27 @@ pub fn section(ui: &mut Ui, t: &Theme, icon: &str, title: &str) {
     fx::glyph(p, pos2(r.min.x + 7.0, cy), icon, fonts::mono(12.0), t.accent);
     fx::text(p, pos2(r.min.x + 22.0, cy), Align2::LEFT_CENTER, title.to_uppercase(), fonts::bold(11.0), t.subtext);
     ui.add_space(6.0);
+}
+
+/// A compact radio tile for a grid of options (languages): a dot and a label, centred
+/// vertically. The selected tile gets the lit plate.
+pub fn option_tile(ui: &mut Ui, t: &Theme, selected: bool, label: &str, size: egui::Vec2) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let h = hover_t(ui, &resp);
+    let s = anim::toggle(ui.ctx(), resp.id.with("sel"), selected, 0.18);
+    let p = ui.painter();
+    p.rect(rect, cr(RADIUS), Color32::from_black_alpha(50), Stroke::new(1.0, Color32::from_white_alpha(8)), StrokeKind::Inside);
+    if s > 0.0 || h > 0.0 {
+        fx::plate(p, rect, RADIUS, Color32::from_white_alpha((5.0 + 6.0 * h) as u8), t.accent, s);
+    }
+    let dot = pos2(rect.min.x + 18.0, rect.center().y);
+    p.circle_stroke(dot, 6.0, Stroke::new(1.5, mix(t.overlay, t.accent, s.max(h * 0.5))));
+    if s > 0.0 {
+        p.circle_filled(dot, 3.5 * s, t.accent);
+    }
+    let clip = p.with_clip_rect(Rect::from_min_max(pos2(dot.x + 14.0, rect.min.y), pos2(rect.max.x - 8.0, rect.max.y)).intersect(p.clip_rect()));
+    fx::text(&clip, pos2(dot.x + 16.0, rect.center().y), Align2::LEFT_CENTER, label, fonts::medium(13.0), mix(t.subtext, t.text, s.max(h)));
+    resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// One selectable row in a short list (e.g. picking a jump server): a radio dot, a title and a

@@ -592,9 +592,14 @@ impl HauntApp {
         place(4.0, 0.0);
         let launch_r = place(32.0, 32.0);
         let has_tab = !self.sessions.is_empty();
+        // Terminal | Files switch for the active tab.
+        let seg_items = [
+            (icon::TERMINAL, tr!("Terminal"), widgets::segment_width(ui, tr!("Terminal"))),
+            (icon::FOLDER, tr!("Files"), widgets::segment_width(ui, tr!("Files"))),
+        ];
         let files_r = if has_tab {
-            place(4.0, 0.0);
-            place(32.0, 32.0)
+            place(10.0, 0.0);
+            place(seg_items[0].2 + seg_items[1].2 + 6.0, 30.0)
         } else {
             Rect::NOTHING
         };
@@ -620,15 +625,10 @@ impl HauntApp {
         if bt(launch_r, icon::SEARCH, false, tr!("Launcher  (Ctrl+K)")).clicked() {
             self.launcher = Some(Launcher { query: String::new(), selected: 0 });
         }
-        if has_tab {
-            let (ic, tip) = if files_on {
-                (icon::TERMINAL, tr!("Back to the terminal  (Ctrl+Shift+F)"))
-            } else {
-                (icon::FOLDER, tr!("Files  (Ctrl+Shift+F)"))
-            };
-            if bt(files_r, ic, false, tip).clicked() {
-                self.toggle_files();
-            }
+        if has_tab
+            && widgets::segments(ui, t, Id::unique("files-switch"), files_r, seg_items, usize::from(files_on)).is_some()
+        {
+            self.toggle_files();
         }
 
         // Tabs start one gap after the wordmark.

@@ -123,6 +123,44 @@ pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, size: egui::Vec2, danger:
     resp
 }
 
+/// Width of one segment of [`segments`]: icon, gap, label and side padding.
+pub fn segment_width(ui: &Ui, label: &str) -> f32 {
+    let g = ui.painter().layout_no_wrap(label.to_owned(), fonts::medium(12.5), Color32::WHITE);
+    (14.0 + 14.0 + 7.0 + g.size().x + 14.0).round()
+}
+
+/// Two side-by-side choices with a knob that slides to the chosen one (like a macOS
+/// segmented control). `items` are (icon, label, width); returns the clicked index.
+pub fn segments(ui: &mut Ui, t: &Theme, id: Id, rect: Rect, items: [(&str, &str, f32); 2], chosen: usize) -> Option<usize> {
+    let k = anim::toggle(ui.ctx(), id.with("knob"), chosen == 1, 0.22);
+    let p = ui.painter();
+    let r = rect.height() / 2.0;
+    p.rect(rect, cr(r), Color32::from_black_alpha(70), Stroke::new(1.0, Color32::from_white_alpha(12)), StrokeKind::Inside);
+    let inner = rect.shrink(3.0);
+    let seg = |i: usize| {
+        let x0 = if i == 0 { inner.min.x } else { inner.min.x + items[0].2 };
+        Rect::from_min_size(pos2(x0, inner.min.y), vec2(items[i].2, inner.height()))
+    };
+    let (a, b) = (seg(0), seg(1));
+    let knob = Rect::from_min_max(a.min + (b.min - a.min) * k, a.max + (b.max - a.max) * k);
+    fx::plate(p, knob, knob.height() / 2.0, t.accent.gamma_multiply(0.16), t.accent, 0.8);
+    let mut clicked = None;
+    for (i, (ic, label, _)) in items.iter().enumerate() {
+        let s = seg(i);
+        let resp = ui.interact(s, id.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let near = if i == 1 { k } else { 1.0 - k };
+        let h = hover_t(ui, &resp);
+        let color = mix(mix(t.subtext, t.text, h * 0.7), t.text, near);
+        let icolor = mix(mix(t.subtext, t.text, h * 0.7), t.accent, near);
+        fx::glyph(p, pos2(s.min.x + 14.0 + 7.0, s.center().y), ic, fonts::mono(12.0), icolor);
+        fx::text(p, pos2(s.min.x + 14.0 + 14.0 + 7.0, s.center().y), Align2::LEFT_CENTER, *label, fonts::medium(12.5), color);
+        if resp.clicked() && i != chosen {
+            clicked = Some(i);
+        }
+    }
+    clicked
+}
+
 /// Switch with a sliding knob; the label (and optional hint) on the left.
 pub fn toggle(ui: &mut Ui, t: &Theme, on: &mut bool, label: &str, hint: &str) -> Response {
     let w = ui.available_width();

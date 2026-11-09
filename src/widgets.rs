@@ -176,17 +176,25 @@ fn input_impl(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, password: 
     // Reserve slots so the box is painted *under* the text, filled in once we know the focus state.
     let glow_slot = ui.painter().add(Shape::Noop);
     let box_slot = ui.painter().add(Shape::Noop);
-    let hide_text = password || veiled;
     let edit = TextEdit::singleline(value)
         .hint_text(egui::RichText::new(hint).color(t.subtext.gamma_multiply(0.7)))
-        .password(hide_text)
+        .password(password)
+        .text_color(if veiled { Color32::TRANSPARENT } else { t.text })
         .font(fonts::ui(13.5))
         .frame(Frame::NONE)
         .margin(Margin::ZERO)
         .align(Align2::LEFT_CENTER)
         .min_size(inner.size())
         .desired_width(inner.width());
-    let resp = ui.put(inner, edit);
+    let resp = if veiled {
+        ui.scope(|ui| {
+            ui.visuals_mut().text_cursor.stroke.color = Color32::TRANSPARENT;
+            ui.put(inner, edit)
+        })
+        .inner
+    } else {
+        ui.put(inner, edit)
+    };
     let f = anim::toggle(ui.ctx(), resp.id.with("focus"), resp.has_focus(), 0.18);
     let p = ui.painter();
     p.set(
@@ -219,8 +227,7 @@ fn input_impl(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, password: 
             let x = pos.x + p.layout_no_wrap(prefix, font, Color32::PLACEHOLDER).size().x;
             extra.push((Rect::from_min_size(pos2(x, pos.y), vec2(2.0, g.size().y)), t.accent));
         }
-        let chip = Rect::from_min_max(pos2(rect.min.x + 4.0, rect.min.y + 4.0), pos2(rect.max.x - 4.0, rect.max.y - 4.0));
-        veil::cover_with(p, chip, mix(t.mantle, t.crust, 0.6), 7.0, vec![(pos, g, t.text)], extra);
+        veil::cover_with(p, inner, t.mantle, 0.0, vec![(pos, g, t.text)], extra);
     }
     resp
 }

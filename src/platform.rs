@@ -45,10 +45,15 @@ pub fn set_blur(window: &impl HasWindowHandle, on: bool) -> bool {
         let m = if on { -1 } else { 0 };
         let margins = MARGINS { cxLeftWidth: m, cxRightWidth: m, cyTopHeight: m, cyBottomHeight: m };
         let dark: i32 = 1;
+        const DWMWA_CAPTION_COLOR: u32 = 35;
+        const DWMWA_BORDER_COLOR: u32 = 34;
+        let dark_color: u32 = 0x000a0a0a;
         let backdrop = if on { DWMSBT_TRANSIENTWINDOW } else { DWMSBT_NONE };
         // SAFETY: valid HWND from winit; pointers reference live locals of the stated size.
         let ok = unsafe {
             DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, (&dark as *const i32).cast(), 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, (&dark_color as *const u32).cast(), 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, (&dark_color as *const u32).cast(), 4);
             let a = DwmExtendFrameIntoClientArea(hwnd, &margins);
             let b = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE as u32, (&backdrop as *const i32).cast(), 4);
             a == 0 && b == 0
@@ -108,20 +113,58 @@ fn hwnd(window: &impl HasWindowHandle) -> Option<windows_sys::Win32::Foundation:
     }
 }
 
+/// Sets whole-window opacity using Windows layered window attributes (0.0 to 1.0).
+/// When opacity < 1.0, DWM composites the window over the desktop with true alpha,
+/// without washing out dark backgrounds to white.
+pub fn set_window_opacity(window: &impl HasWindowHandle, opacity: f32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes,
+            SetWindowLongPtrW, WS_EX_LAYERED,
+        };
+        let Some(hwnd) = hwnd(window) else { return };
+        let opacity = opacity.clamp(0.2, 1.0);
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            if opacity >= 0.999 {
+                if style & WS_EX_LAYERED as isize != 0 {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_LAYERED as isize));
+                }
+            } else {
+                if style & WS_EX_LAYERED as isize == 0 {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED as isize);
+                }
+                let alpha = (opacity * 255.0).round() as u8;
+                SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, opacity);
+    }
+}
+
 /// Exclude a window with the specified title from screen capture (OBS, Discord, ShareX).
 #[allow(dead_code)]
 pub fn exclude_from_capture_by_title(title: &str) -> bool {
-    setup_overlay_window(title, Option::<&eframe::Frame>::None)
+    setup_overlay_window(title, Option::<&eframe::Frame>::None, 1.0)
 }
 
 /// Sets capture exclusion on the overlay window and binds it to the main window as owner
 /// so it follows the main window's z-order, stays hidden when minimized, and is never captured.
-pub fn setup_overlay_window(overlay_title: &str, main_window: Option<&impl HasWindowHandle>) -> bool {
+pub fn setup_overlay_window(
+    overlay_title: &str,
+    main_window: Option<&impl HasWindowHandle>,
+    opacity: f32,
+) -> bool {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, GWLP_HWNDPARENT, SetWindowDisplayAffinity, SetWindowLongPtrW,
-            WDA_EXCLUDEFROMCAPTURE,
+            FindWindowW, GWLP_HWNDPARENT, GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA,
+            SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW,
+            WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
         };
         let wide: Vec<u16> = overlay_title.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: FindWindowW called with valid null-terminated wide string.
@@ -129,6 +172,18 @@ pub fn setup_overlay_window(overlay_title: &str, main_window: Option<&impl HasWi
             let overlay_hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
             if !overlay_hwnd.is_null() {
                 SetWindowDisplayAffinity(overlay_hwnd, WDA_EXCLUDEFROMCAPTURE);
+                let ex_style = GetWindowLongPtrW(overlay_hwnd, GWL_EXSTYLE);
+                if ex_style & (WS_EX_TRANSPARENT as isize | WS_EX_LAYERED as isize)
+                    != (WS_EX_TRANSPARENT as isize | WS_EX_LAYERED as isize)
+                {
+                    SetWindowLongPtrW(
+                        overlay_hwnd,
+                        GWL_EXSTYLE,
+                        ex_style | WS_EX_TRANSPARENT as isize | WS_EX_LAYERED as isize,
+                    );
+                }
+                let alpha = (opacity.clamp(0.2, 1.0) * 255.0).round() as u8;
+                SetLayeredWindowAttributes(overlay_hwnd, 0, alpha, LWA_ALPHA);
                 if let Some(main) = main_window {
                     if let Some(main_hwnd) = hwnd(main) {
                         SetWindowLongPtrW(overlay_hwnd, GWLP_HWNDPARENT, main_hwnd as isize);
@@ -140,8 +195,69 @@ pub fn setup_overlay_window(overlay_title: &str, main_window: Option<&impl HasWi
     }
     #[cfg(not(windows))]
     {
-        let _ = (overlay_title, main_window);
+        let _ = (overlay_title, main_window, opacity);
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(windows)]
+    fn test_layered_window_and_dwm() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DefWindowProcW, RegisterClassW, WNDCLASSW,
+            WS_POPUP, GWL_EXSTYLE, WS_EX_LAYERED, SetWindowLongPtrW, SetLayeredWindowAttributes, LWA_ALPHA,
+        };
+        use windows_sys::Win32::Graphics::Dwm::{
+            DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+        };
+        use windows_sys::Win32::UI::Controls::MARGINS;
+
+        unsafe {
+            let class_name: Vec<u16> = "TestDwmClass\0".encode_utf16().collect();
+            let wc = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(DefWindowProcW),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: std::ptr::null_mut(),
+                hIcon: std::ptr::null_mut(),
+                hCursor: std::ptr::null_mut(),
+                hbrBackground: std::ptr::null_mut(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class_name.as_ptr(),
+            };
+            RegisterClassW(&wc);
+            let hwnd = CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                class_name.as_ptr(),
+                WS_POPUP,
+                100, 100, 200, 200,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            assert!(!hwnd.is_null());
+
+            let dark: i32 = 1;
+            let res_dark = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, (&dark as *const i32).cast(), 4);
+            let m = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+            let res_margins = DwmExtendFrameIntoClientArea(hwnd, &m);
+            let backdrop = DWMSBT_TRANSIENTWINDOW;
+            let res_backdrop = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE as u32, (&backdrop as *const i32).cast(), 4);
+
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, WS_EX_LAYERED as isize);
+            let res_layered = SetLayeredWindowAttributes(hwnd, 0, 200, LWA_ALPHA);
+            assert_ne!(res_layered, 0);
+
+            println!("res_dark: {res_dark:#x}, res_margins: {res_margins:#x}, res_backdrop: {res_backdrop:#x}");
+            DestroyWindow(hwnd);
+        }
+    }
+}
+
 

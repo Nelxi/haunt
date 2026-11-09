@@ -938,7 +938,7 @@ fn veil_screen<'f>(
                     seg = c;
                 }
             }
-            veil::cover(painter, m.cell_rect(c0, row, c1 - c0).expand2(vec2(1.5, 0.0)), chip, 3.0, texts);
+            veil::cover(painter, m.cell_rect(c0, row, c1 - c0), chip, 0.0, texts);
         }
     }
     masked

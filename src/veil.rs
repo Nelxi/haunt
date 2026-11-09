@@ -14,15 +14,15 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 
-use eframe::egui::{Align2, Color32, CornerRadius, FontId, Galley, Painter, Pos2, Rect, pos2, vec2};
+use eframe::egui::{Align2, Color32, FontId, Galley, Painter, Pos2, Rect, pos2, vec2};
 use regex::Regex;
 
 /// One masked area: what to paint in the overlay over it.
 pub struct Secret {
-    rect: Rect,
+    _rect: Rect,
     clip: Rect,
-    fill: Color32,
-    radius: f32,
+    _fill: Color32,
+    _radius: f32,
     opacity: f32,
     texts: Vec<(Pos2, Arc<Galley>, Color32)>,
     /// Extra solid rects painted over the text (e.g. a text caret).
@@ -157,8 +157,8 @@ pub fn text(painter: &Painter, pos: Pos2, align: Align2, text: impl ToString, fo
         painter.galley(rect.min, galley, color);
         return rect;
     }
-    let chip = rect.expand2(vec2(3.0, 1.0));
-    cover(painter, chip, fill, 5.0, vec![(rect.min, galley, color)]);
+    let chip = rect;
+    cover(painter, chip, fill, 0.0, vec![(rect.min, galley, color)]);
     rect
 }
 
@@ -182,8 +182,8 @@ pub fn text_auto(painter: &Painter, pos: Pos2, align: Align2, text: &str, font: 
         if r.end > r.start {
             let g = painter.layout_no_wrap(text[r.clone()].to_string(), font.clone(), Color32::PLACEHOLDER);
             let w = g.size().x;
-            let chip = Rect::from_min_size(pos2(x, rect.min.y), vec2(w, rect.height())).expand2(vec2(2.0, 1.0));
-            cover(painter, chip, fill, 4.0, vec![(pos2(x, rect.min.y), g, color)]);
+            let chip = Rect::from_min_size(pos2(x, rect.min.y), vec2(w, rect.height()));
+            cover(painter, chip, fill, 0.0, vec![(pos2(x, rect.min.y), g, color)]);
             x += w;
         }
         at = r.end;
@@ -213,23 +213,13 @@ pub fn cover_with(
     paint_mask(painter, rect, fill, radius);
     STATE.with_borrow_mut(|s| {
         let top = s.top;
-        s.secrets.push(Secret { rect, clip, fill, radius, opacity: painter.opacity(), texts, extra, top });
+        s.secrets.push(Secret { _rect: rect, clip, _fill: fill, _radius: radius, opacity: painter.opacity(), texts, extra, top });
     });
 }
 
-/// The masked look: a soft chip with a row of dots, like a password field.
-fn paint_mask(painter: &Painter, rect: Rect, fill: Color32, radius: f32) {
-    let cr = CornerRadius::same(radius.min(rect.height() / 2.0) as u8);
-    painter.rect_filled(rect, cr, fill);
-    let lum = (fill.r() as u32 + fill.g() as u32 + fill.b() as u32) / 3;
-    let dot = if lum > 128 { Color32::from_black_alpha(110) } else { Color32::from_white_alpha(90) };
-    let r = (rect.height() * 0.11).clamp(1.5, 3.0);
-    let step = r * 3.4;
-    let n = ((rect.width() - step) / step).floor().max(1.0) as usize;
-    let x0 = rect.center().x - (n as f32 - 1.0) * step / 2.0;
-    for i in 0..n {
-        painter.circle_filled(pos2(x0 + i as f32 * step, rect.center().y), r, dot);
-    }
+/// The masked look: empty space in the captured window (OBS / Discord / recording).
+fn paint_mask(_painter: &Painter, _rect: Rect, _fill: Color32, _radius: f32) {
+    // Left as blank empty space in screen capture.
 }
 
 /// Paints the real content; called inside the capture-excluded overlay window.
@@ -239,7 +229,7 @@ pub fn paint_real(painter: &Painter, s: &Secret) {
     if k <= 0.0 {
         return;
     }
-    p.rect_filled(s.rect, CornerRadius::same(s.radius.min(s.rect.height() / 2.0) as u8), s.fill.gamma_multiply(k));
+    // No background podlozhka: clean text that looks identical to normal unmasked text!
     for (pos, g, color) in &s.texts {
         p.galley(*pos, g.clone(), color.gamma_multiply(k));
     }

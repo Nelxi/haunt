@@ -167,14 +167,15 @@ impl HauntApp {
     }
 
     /// (background alpha, card alpha). With blur on, the two layers stack to the
-    /// configured opacity: 1 - (1 - a)^2 = opacity. Without blur the window is opaque.
+    /// configured opacity: 1 - (1 - a)^2 = opacity. Without blur, whole-window opacity
+    /// is handled via OS layered window attributes.
     fn layer_alpha(&self) -> (f32, f32) {
-        let op = self.cfg.settings.opacity.clamp(0.3, 1.0);
+        let op = self.cfg.settings.opacity.clamp(0.2, 1.0);
         if self.blur_active {
             let a = 1.0 - (1.0 - op).sqrt();
             (a, a)
         } else {
-            (1.0, op)
+            (1.0, 1.0)
         }
     }
 
@@ -452,13 +453,13 @@ impl HauntApp {
                         c1: t.accent,
                         c2: t.accent2,
                         c3: t.ansi[5],
-                        alpha,
+                        alpha: if self.blur_active { alpha } else { 1.0 },
                         intensity: 1.0,
                     },
                 );
             }
             _ => {
-                p.rect_filled(rect, 0.0, t.crust.gamma_multiply(alpha));
+                p.rect_filled(rect, 0.0, if self.blur_active { t.crust.gamma_multiply(alpha) } else { t.crust });
             }
         }
         if !maximized {
@@ -531,7 +532,14 @@ impl HauntApp {
         let t = self.theme();
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
-        let painter = ui.painter_at(area);
+        let screen = ctx.content_rect();
+        // Glow painter is not clipped to the tight titlebar row, so the capsule shadow fades smoothly
+        // without being sliced horizontally by scissors!
+        let glow_painter = ui.painter().with_clip_rect(screen);
+        let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+            pos2(area.min.x, screen.min.y),
+            pos2(area.max.x, screen.max.y),
+        ));
         let h = 30.0;
         let y0 = area.center().y - h / 2.0;
         let mut x = area.min.x;
@@ -560,7 +568,7 @@ impl HauntApp {
 
             let fill = mix(t.surface.gamma_multiply(0.45 + 0.35 * hov), t.accent, act);
             if act > 0.01 {
-                fx::glow(&painter, rect, h / 2.0, t.accent.gamma_multiply(0.35 * act), 18.0, 0.0);
+                fx::glow(&glow_painter, rect, h / 2.0, t.accent.gamma_multiply(0.35 * act), 18.0, 0.0);
             }
             painter.rect(
                 rect,
@@ -1479,7 +1487,7 @@ impl HauntApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(rect.min));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(rect.size()));
                 #[cfg(windows)]
-                platform::setup_overlay_window("haunt-veil-overlay", Some(frame));
+                platform::setup_overlay_window("haunt-veil-overlay", Some(frame), self.cfg.settings.opacity);
 
                 let painter = ui.painter();
                 for s in &secrets {
@@ -1532,6 +1540,8 @@ impl eframe::App for HauntApp {
         if self.blur_active {
             platform::hide_caption_buttons(frame);
         }
+        #[cfg(windows)]
+        platform::set_window_opacity(frame, self.cfg.settings.opacity);
         let (focused, maximized, dt) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().maximized.unwrap_or(false), i.stable_dt));
         let animate = self.cfg.settings.animations;
         if focused && animate {

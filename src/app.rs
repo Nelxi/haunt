@@ -100,7 +100,9 @@ pub struct HauntApp {
 
 impl HauntApp {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Handle) -> Self {
+        let t0 = std::time::Instant::now();
         fonts::install(&cc.egui_ctx);
+        log::debug!("startup: fonts {:?}", t0.elapsed());
         let (mut cfg, load_error) = Config::load();
         // Debug builds: override opacity for visual tests without touching the saved config.
         #[cfg(debug_assertions)]
@@ -109,8 +111,10 @@ impl HauntApp {
         }
         let theme = theme::by_name(&cfg.settings.theme);
 
+        log::debug!("startup: config {:?}", t0.elapsed());
         platform::round_corners(cc);
         let blur_active = cfg.settings.blur && platform::set_blur(cc, true);
+        log::debug!("startup: window chrome {:?}", t0.elapsed());
         let aurora = cc.gl.as_ref().and_then(|gl| match Aurora::new(gl) {
             Ok(a) => Some(Arc::new(a)),
             Err(e) => {
@@ -119,6 +123,7 @@ impl HauntApp {
             }
         });
 
+        log::debug!("startup: shader {:?}", t0.elapsed());
         let mut app = Self {
             palette: theme.palette256(),
             applied_theme: String::new(),
@@ -618,7 +623,7 @@ impl HauntApp {
             ui.multiply_opacity(appear);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("SERVERS").font(fonts::bold(11.5)).color(t.subtext));
-                ui.label(RichText::new(self.cfg.servers.len().to_string()).font(fonts::ui(11.5)).color(t.overlay));
+                ui.label(RichText::new(self.cfg.servers.len().to_string()).font(fonts::ui(11.5)).color(t.subtext.gamma_multiply(0.6)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::icon_button(ui, t, icon::PLUS, vec2(26.0, 24.0), false).on_hover_text("New server  (Ctrl+Shift+N)").clicked() {
                         add = true;
@@ -1349,6 +1354,9 @@ impl eframe::App for HauntApp {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         let started = *self.started.get_or_insert(now);
+        if self.started == Some(now) {
+            log::debug!("startup: first frame begins");
+        }
         self.apply_style(&ctx);
 
         if self.blur_wanted != self.cfg.settings.blur {
@@ -1461,6 +1469,9 @@ impl eframe::App for HauntApp {
         self.settings_dialog(&ctx);
         self.launcher_dialog(&ctx);
         self.draw_toasts(&ctx);
+        if self.started == Some(now) {
+            log::debug!("startup: first frame built");
+        }
 
         // When a dialog closes (Esc, click outside) or focus ends up nowhere, hand the
         // keyboard back to the terminal so keys don't silently go nowhere.

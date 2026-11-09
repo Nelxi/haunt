@@ -99,7 +99,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: "Catppuccin Mocha".into(),
+            theme: "Graphite Mono".into(),
             font_size: 13.5,
             line_height: 1.2,
             scrollback: 10_000,

@@ -7,18 +7,25 @@
 //!
 //! Placeholders: `{name}` is replaced by the argument; `{name:one|few|many}` picks a word
 //! form by the number in `name` using the language's plural rules (English and the
-//! Romance/Germanic languages use two forms, `{n:file|files}`; Russian and Ukrainian three).
+//! Romance/Germanic languages use two forms, `{n:file|files}`; the Slavic ones three; Kazakh,
+//! Korean, Chinese and Japanese one).
 
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+mod be;
 mod de;
 mod es;
 mod fr;
+mod ja;
+mod kk;
+mod ko;
 mod ru;
+mod sr;
 mod uk;
+mod zh;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
@@ -28,10 +35,29 @@ pub enum Lang {
     De,
     Es,
     Fr,
+    Be,
+    Kk,
+    Sr,
+    Ko,
+    Zh,
+    Ja,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 6] = [Lang::En, Lang::Ru, Lang::Uk, Lang::De, Lang::Es, Lang::Fr];
+    pub const ALL: [Lang; 12] = [
+        Lang::En,
+        Lang::Ru,
+        Lang::Uk,
+        Lang::Be,
+        Lang::Kk,
+        Lang::Sr,
+        Lang::De,
+        Lang::Es,
+        Lang::Fr,
+        Lang::Zh,
+        Lang::Ja,
+        Lang::Ko,
+    ];
 
     /// The code stored in the config.
     pub fn code(self) -> &'static str {
@@ -42,6 +68,12 @@ impl Lang {
             Lang::De => "de",
             Lang::Es => "es",
             Lang::Fr => "fr",
+            Lang::Be => "be",
+            Lang::Kk => "kk",
+            Lang::Sr => "sr",
+            Lang::Ko => "ko",
+            Lang::Zh => "zh",
+            Lang::Ja => "ja",
         }
     }
 
@@ -54,7 +86,18 @@ impl Lang {
             Lang::De => "Deutsch",
             Lang::Es => "Español",
             Lang::Fr => "Français",
+            Lang::Be => "Беларуская",
+            Lang::Kk => "Қазақша",
+            Lang::Sr => "Српски",
+            Lang::Ko => "한국어",
+            Lang::Zh => "简体中文",
+            Lang::Ja => "日本語",
         }
+    }
+
+    /// Whether numbers are written "4,2" rather than "4.2".
+    pub fn decimal_comma(self) -> bool {
+        !matches!(self, Lang::En | Lang::Ko | Lang::Zh | Lang::Ja)
     }
 
     pub fn from_code(code: &str) -> Option<Lang> {
@@ -71,6 +114,12 @@ impl Lang {
             Lang::De => de::T,
             Lang::Es => es::T,
             Lang::Fr => fr::T,
+            Lang::Be => be::T,
+            Lang::Kk => kk::T,
+            Lang::Sr => sr::T,
+            Lang::Ko => ko::T,
+            Lang::Zh => zh::T,
+            Lang::Ja => ja::T,
         }
     }
 
@@ -98,8 +147,16 @@ pub fn system() -> Lang {
         // SAFETY: no arguments, returns a LANGID.
         let id = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
         match id & 0x3ff {
-            0x19 | 0x23 | 0x3f => Lang::Ru, // Russian; Belarusian and Kazakh users mostly read Russian
+            0x19 => Lang::Ru,
             0x22 => Lang::Uk,
+            0x23 => Lang::Be,
+            0x3f => Lang::Kk,
+            // 0x1a is shared by Serbian, Croatian and Bosnian; only the Serbian locales count.
+            0x1a if matches!(id, 0x0c1a | 0x081a | 0x241a | 0x281a | 0x2c1a | 0x301a | 0x1c1a | 0x181a) => Lang::Sr,
+            0x12 => Lang::Ko,
+            0x11 => Lang::Ja,
+            // Simplified Chinese (mainland, Singapore).
+            0x04 if matches!(id, 0x0804 | 0x1004) => Lang::Zh,
             0x07 => Lang::De,
             0x0a => Lang::Es,
             0x0c => Lang::Fr,
@@ -134,7 +191,7 @@ pub fn tr_in(lang: Lang, key: &'static str) -> &'static str {
 fn plural_form(lang: Lang, n: i64) -> usize {
     let n = n.unsigned_abs();
     match lang {
-        Lang::Ru | Lang::Uk => {
+        Lang::Ru | Lang::Uk | Lang::Be | Lang::Sr => {
             let (d, h) = (n % 10, n % 100);
             if d == 1 && h != 11 {
                 0
@@ -145,6 +202,7 @@ fn plural_form(lang: Lang, n: i64) -> usize {
             }
         }
         Lang::Fr => usize::from(n > 1),
+        Lang::Kk | Lang::Ko | Lang::Zh | Lang::Ja => 0,
         _ => usize::from(n != 1),
     }
 }
@@ -308,6 +366,11 @@ mod tests {
         for (n, form) in [(1, "a"), (21, "a"), (11, "c"), (2, "b"), (24, "b"), (12, "c"), (5, "c"), (0, "c"), (101, "a"), (112, "c")] {
             assert_eq!(f(Lang::Ru, n), format!("{n} {form}"), "ru {n}");
             assert_eq!(f(Lang::Uk, n), format!("{n} {form}"), "uk {n}");
+            assert_eq!(f(Lang::Be, n), format!("{n} {form}"), "be {n}");
+            assert_eq!(f(Lang::Sr, n), format!("{n} {form}"), "sr {n}");
+        }
+        for lang in [Lang::Kk, Lang::Ko, Lang::Zh, Lang::Ja] {
+            assert_eq!(format_in(lang, "{n} {n:x}", &[("n", &7)]), "7 x");
         }
     }
 

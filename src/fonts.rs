@@ -117,6 +117,26 @@ pub fn install(ctx: &egui::Context) {
     } else {
         false
     };
+    // Chinese, Japanese and Korean come from Windows' own UI fonts. The same Han character is
+    // drawn differently in Chinese and Japanese, so the interface language picks which goes first.
+    let cjk_files: [(&str, &[&str]); 3] = [
+        ("cjk-zh", &["msyh.ttc", "msyh.ttf"]),
+        ("cjk-ja", &["YuGothM.ttc", "YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"]),
+        ("cjk-ko", &["malgun.ttf"]),
+    ];
+    let mut cjk: Vec<&str> = Vec::new();
+    for (name, files) in cjk_files {
+        if let Some(d) = read_system(files) {
+            add(name, FontData::from_owned(d));
+            cjk.push(name);
+        }
+    }
+    let first = match crate::i18n::current() {
+        crate::i18n::Lang::Ja => "cjk-ja",
+        crate::i18n::Lang::Ko => "cjk-ko",
+        _ => "cjk-zh",
+    };
+    cjk.sort_by_key(|n| *n != first);
     let has_symbols = if let Some(d) = read_system(&["seguisym.ttf"]) {
         add("symbols", FontData::from_owned(d));
         true
@@ -133,9 +153,14 @@ pub fn install(ctx: &egui::Context) {
         v
     };
 
-    defs.families.insert(FontFamily::Monospace, chain(&["mono"], &egui_mono));
-    defs.families.insert(FontFamily::Name("mono-bold".into()), chain(&["mono-bold", "mono"], &egui_mono));
-    defs.families.insert(FontFamily::Name("mono-italic".into()), chain(&["mono-italic", "mono"], &egui_mono));
+    let mono_chain = |first: &[&'static str]| -> Vec<&'static str> {
+        let mut v = first.to_vec();
+        v.extend(cjk.iter().copied());
+        v
+    };
+    defs.families.insert(FontFamily::Monospace, chain(&mono_chain(&["mono"]), &egui_mono));
+    defs.families.insert(FontFamily::Name("mono-bold".into()), chain(&mono_chain(&["mono-bold", "mono"]), &egui_mono));
+    defs.families.insert(FontFamily::Name("mono-italic".into()), chain(&mono_chain(&["mono-italic", "mono"]), &egui_mono));
 
     let face = |sf: &'static str, onest: &'static str| -> Vec<&'static str> {
         let mut v = Vec::new();
@@ -146,6 +171,7 @@ pub fn install(ctx: &egui::Context) {
         if has_segoe {
             v.push("segoe");
         }
+        v.extend(cjk.iter().copied());
         v.push("mono");
         v
     };

@@ -140,10 +140,11 @@ pub struct HauntApp {
 impl HauntApp {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Handle) -> Self {
         let t0 = std::time::Instant::now();
-        fonts::install(&cc.egui_ctx);
-        log::debug!("startup: fonts {:?}", t0.elapsed());
         let (mut cfg, load_error) = Config::load();
         crate::i18n::set(&cfg.settings.language);
+        // After the language: it decides which CJK face goes first.
+        fonts::install(&cc.egui_ctx);
+        log::debug!("startup: fonts {:?}", t0.elapsed());
         // Debug builds: override opacity for visual tests without touching the saved config.
         #[cfg(debug_assertions)]
         if let Some(op) = std::env::var("HAUNT_OPACITY").ok().and_then(|v| v.parse().ok()) {
@@ -1515,7 +1516,7 @@ impl HauntApp {
                 widgets::section(ui, t, icon::GLOBE, tr!("Language"));
                 {
                     let w = ui.available_width();
-                    let cols = 3;
+                    let cols = 4;
                     let gap = 8.0;
                     let cw = ((w - gap * (cols as f32 - 1.0)) / cols as f32).floor();
                     let system = tr!("System ({lang})", lang = crate::i18n::system().native_name());
@@ -1537,6 +1538,8 @@ impl HauntApp {
                     if let Some(code) = picked {
                         self.cfg.settings.language = code;
                         crate::i18n::set(&self.cfg.settings.language);
+                        // Chinese and Japanese draw the same characters differently.
+                        fonts::install(ui.ctx());
                     }
                 }
 

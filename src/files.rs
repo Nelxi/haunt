@@ -159,7 +159,7 @@ fn human_size(n: u64) -> String {
         i += 1;
     }
     let num = if v < 10.0 { format!("{v:.1}") } else { format!("{v:.0}") };
-    let num = if crate::i18n::current() == crate::i18n::Lang::En { num } else { num.replace('.', ",") };
+    let num = if crate::i18n::current().decimal_comma() { num.replace('.', ",") } else { num };
     format!("{num} {}", units[i])
 }
 

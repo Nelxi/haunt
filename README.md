@@ -51,7 +51,7 @@ like a riced Hyprland desktop.
 - HyDE/Hyprland animation curves for tabs, dialogs, toasts and pane switches
 - themes: Ghostly Night (default), Catppuccin Mocha, Graphite Mono, Tokyo Night, Rosé Pine, Gruvbox Dark, Nord
 - every effect can be switched off for a calm, minimal UI
-- interface in English, Russian, Ukrainian, German, Spanish and French; follows the Windows language by default
+- interface in English, Russian, Ukrainian, Belarusian, Kazakh, Serbian, German, Spanish, French, Chinese, Japanese and Korean; follows the Windows language by default (CJK text uses the Windows UI fonts)
 
 **Workflow**
 - saved servers with groups and search; a start screen with quick connect and recent servers

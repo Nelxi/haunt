@@ -204,9 +204,14 @@ impl HauntApp {
             }
             Ok("settings") => app.show_settings = true,
             Ok("launcher") => app.launcher = Some(Launcher { query: String::new(), selected: 0 }),
-            Ok("connect") => {
+            Ok("connect") | Ok("files") => {
                 if let Some(s) = app.cfg.servers.first().cloned() {
                     app.connect(&cc.egui_ctx, &s);
+                }
+                if std::env::var("HAUNT_PREVIEW").as_deref() == Ok("files")
+                    && let Some(s) = app.sessions.last_mut()
+                {
+                    s.show_files = true;
                 }
             }
             _ => {}
@@ -347,6 +352,7 @@ impl HauntApp {
             || self.confirm_delete.is_some()
             || self.launcher.is_some()
             || self.active_prompt()
+            || self.sessions.get(self.active).is_some_and(|s| s.show_files && s.files.as_ref().is_some_and(|f| f.modal_open()))
     }
 
     /// Time the dialog `key` was opened (records it on first call).
@@ -413,10 +419,18 @@ impl HauntApp {
 
     // ------------------------------------------------------------ shortcuts
 
+    /// Switches the active tab between its terminal and its file manager.
+    fn toggle_files(&mut self) {
+        if let Some(s) = self.sessions.get_mut(self.active) {
+            s.show_files = !s.show_files;
+            s.want_focus = !s.show_files;
+        }
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump, streamer) = ctx.input_mut(|i| {
+        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump, streamer, files) = ctx.input_mut(|i| {
             let jump = digits.iter().position(|k| i.consume_key(Modifiers::CTRL, *k));
             (
                 i.consume_key(Modifiers::CTRL, Key::Tab),
@@ -429,8 +443,12 @@ impl HauntApp {
                 i.consume_key(Modifiers::CTRL, Key::B),
                 jump,
                 i.consume_key(cs, Key::S),
+                i.consume_key(cs, Key::F),
             )
         });
+        if files {
+            self.toggle_files();
+        }
         let n = self.sessions.len();
         if n > 0 && next {
             self.activate((self.active + 1) % n);
@@ -573,7 +591,15 @@ impl HauntApp {
         let settings_r = place(32.0, 32.0);
         place(4.0, 0.0);
         let launch_r = place(32.0, 32.0);
-        let controls_left = launch_r.min.x - 12.0;
+        let has_tab = !self.sessions.is_empty();
+        let files_r = if has_tab {
+            place(4.0, 0.0);
+            place(32.0, 32.0)
+        } else {
+            Rect::NOTHING
+        };
+        let controls_left = if has_tab { files_r.min.x } else { launch_r.min.x } - 12.0;
+        let files_on = self.sessions.get(self.active).is_some_and(|s| s.show_files);
 
         let mut bt = |r: Rect, ic: &str, danger: bool, tip: &str| {
             let resp = ui.scope_builder(UiBuilder::new().max_rect(r), |ui| widgets::icon_button(ui, t, ic, r.size(), danger)).inner;
@@ -593,6 +619,16 @@ impl HauntApp {
         }
         if bt(launch_r, icon::SEARCH, false, tr!("Launcher  (Ctrl+K)")).clicked() {
             self.launcher = Some(Launcher { query: String::new(), selected: 0 });
+        }
+        if has_tab {
+            let (ic, tip) = if files_on {
+                (icon::TERMINAL, tr!("Back to the terminal  (Ctrl+Shift+F)"))
+            } else {
+                (icon::FOLDER, tr!("Files  (Ctrl+Shift+F)"))
+            };
+            if bt(files_r, ic, false, tip).clicked() {
+                self.toggle_files();
+            }
         }
 
         // Tabs start one gap after the wordmark.
@@ -1948,9 +1984,21 @@ impl eframe::App for HauntApp {
                 pane_alpha: self.layer_alpha().1,
             };
             let s = &mut self.sessions[self.active];
+            let rt = self.rt.clone();
             ui.scope_builder(UiBuilder::new().max_rect(main.translate(off)), |ui| {
                 ui.multiply_opacity(alpha);
-                if let termview::Action::Reconnect = termview::show(ui, s, &look, input_enabled) {
+                if s.show_files {
+                    let mut files = s.files.take().unwrap_or_else(|| Box::new(crate::files::Files::new(s.id)));
+                    let look = crate::files::Look {
+                        theme: t,
+                        pane_alpha: look.pane_alpha,
+                        radius: look.settings.rounding.clamp(0.0, 30.0),
+                        gaps: look.settings.gaps,
+                        server: &s.label,
+                    };
+                    files.show(ui, s, &look, &rt, input_enabled);
+                    s.files = Some(files);
+                } else if let termview::Action::Reconnect = termview::show(ui, s, &look, input_enabled) {
                     reconnect = true;
                 }
             });
@@ -1983,7 +2031,8 @@ impl eframe::App for HauntApp {
         // When a dialog closes (Esc, click outside) or focus ends up nowhere, hand the
         // keyboard back to the terminal so keys don't silently go nowhere.
         if !self.modal_open() && ctx.memory(|m| m.focused().is_none())
-            && let Some(s) = self.sessions.get_mut(self.active) {
+            && let Some(s) = self.sessions.get_mut(self.active)
+            && !s.show_files {
                 s.want_focus = true;
                 ctx.request_repaint();
             }

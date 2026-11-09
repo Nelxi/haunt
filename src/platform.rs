@@ -211,13 +211,125 @@ pub fn local_month() -> u16 {
 #[cfg(not(windows))]
 pub fn local_month() -> u16 {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400) as i64;
-    // Howard Hinnant's civil_from_days, month only.
+    civil_from_days(days).1 as u16
+}
+
+/// (year, month, day) of a day count since 1970-01-01 (Howard Hinnant's algorithm).
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
+    let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    (if mp < 10 { mp + 3 } else { mp - 9 }) as u16
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// Day count since 1970-01-01 of a civil date (inverse of [`civil_from_days`]).
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let m = m as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Seconds to add to UTC to get the PC's local time, right now.
+#[cfg(windows)]
+pub fn utc_offset_secs() -> i64 {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+    let secs = |st: &SYSTEMTIME| {
+        days_from_civil(st.wYear as i64, st.wMonth as u32, st.wDay as u32) * 86_400
+            + st.wHour as i64 * 3600
+            + st.wMinute as i64 * 60
+            + st.wSecond as i64
+    };
+    // SAFETY: both fill a plain struct we own.
+    let (mut local, mut utc) = unsafe { (std::mem::zeroed::<SYSTEMTIME>(), std::mem::zeroed::<SYSTEMTIME>()) };
+    unsafe {
+        GetLocalTime(&mut local);
+        GetSystemTime(&mut utc);
+    }
+    // The two calls can straddle a second; offsets are whole minutes anyway.
+    ((secs(&local) - secs(&utc)) as f64 / 60.0).round() as i64 * 60
+}
+
+#[cfg(not(windows))]
+pub fn utc_offset_secs() -> i64 {
+    0
+}
+
+/// "2026-11-09 10:32" in local time for a Unix timestamp.
+pub fn format_local(unix: i64) -> String {
+    let t = unix + utc_offset_secs();
+    let (y, m, d) = civil_from_days(t.div_euclid(86_400));
+    let s = t.rem_euclid(86_400);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", s / 3600, s % 3600 / 60)
+}
+
+#[cfg(windows)]
+fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Moves files and folders to the Recycle Bin, so a slip can be undone.
+#[cfg(windows)]
+pub fn to_recycle_bin(paths: &[std::path::PathBuf]) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::{FO_DELETE, SHFILEOPSTRUCTW, SHFileOperationW};
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // A list of NUL-terminated paths, ended by an extra NUL.
+    let mut from: Vec<u16> = paths.iter().flat_map(|p| wide(p.as_os_str())).collect();
+    from.push(0);
+    const FOF_SILENT: u16 = 0x4;
+    const FOF_NOCONFIRMATION: u16 = 0x10;
+    const FOF_ALLOWUNDO: u16 = 0x40;
+    const FOF_NOERRORUI: u16 = 0x400;
+    // SAFETY: the struct is zeroed (null handles and strings) and `from` outlives the call.
+    let mut op = unsafe { std::mem::zeroed::<SHFILEOPSTRUCTW>() };
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.as_ptr();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    let r = unsafe { SHFileOperationW(&mut op) };
+    if r != 0 {
+        return Err(format!("0x{r:x}"));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err("aborted".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn to_recycle_bin(paths: &[std::path::PathBuf]) -> Result<(), String> {
+    for p in paths {
+        let r = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+        r.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Opens a file with its default app (or a folder in Explorer).
+#[cfg(windows)]
+pub fn open_path(path: &std::path::Path) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let verb = wide(std::ffi::OsStr::new("open"));
+    let file = wide(path.as_os_str());
+    // SAFETY: NUL-terminated strings that live through the call; null for the rest.
+    unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
+}
+
+#[cfg(not(windows))]
+pub fn open_path(path: &std::path::Path) {
+    let _ = std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(path).spawn();
 }
 
 /// Snow season: December to February.
@@ -227,6 +339,16 @@ pub fn is_winter() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn civil_dates_round_trip() {
+        assert_eq!(super::civil_from_days(0), (1970, 1, 1));
+        assert_eq!(super::civil_from_days(19_782), (2024, 2, 29));
+        for d in (-800_000..800_000).step_by(997) {
+            let (y, m, dd) = super::civil_from_days(d);
+            assert_eq!(super::days_from_civil(y, m, dd), d);
+        }
+    }
+
     #[test]
     #[cfg(windows)]
     fn test_layered_window_and_dwm() {

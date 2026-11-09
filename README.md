@@ -40,6 +40,11 @@ like a riced Hyprland desktop.
 - keepalive; when a working connection drops, haunt says why and **reconnects by itself** with growing pauses (same tab, same scrollback)
 - **proxies like PuTTY**: SOCKS5 and HTTP CONNECT (with auth, DNS resolved by the proxy) or a **jump host** through another saved server (ProxyJump), chains of any depth
 
+**Files**
+- FileZilla-style **SFTP manager** in every tab (`Ctrl Shift F`): this PC on the left, the server on the right, over the tab's own connection, so proxies and jump hosts just work and it reopens itself after a reconnect
+- drag files between panes or straight from Explorer; a queue with progress, speed and time left; cancel any transfer, half-written files are cleaned up
+- whole folders both ways, rename, new folder, delete (to the Recycle Bin on your side), sort by name/size/date, hidden files toggle, keyboard: arrows, Enter, Backspace, Tab, F2, F5, F7, Del
+
 **Looks**
 - frameless window with acrylic blur and a GLSL night sky: fog, stars, slow snow
 - floating plates on a 4 px grid, top edges that catch the accent light; SF Pro Display for the UI when it is installed, bundled Onest otherwise
@@ -80,6 +85,7 @@ Needs Rust 1.85+ and the MSVC toolchain (Visual Studio Build Tools).
 | `Ctrl 1…9` | jump to tab |
 | `Ctrl B` | toggle sidebar |
 | `Ctrl ,` | settings |
+| `Ctrl Shift F` | files (SFTP) / back to the terminal |
 | `Ctrl Shift C` / `Ctrl Shift V` | copy / paste |
 | `Shift PgUp` / `Shift PgDn` | scroll history |
 
@@ -97,7 +103,8 @@ haunt keeps its own `known_hosts` next to the config and also trusts `~/.ssh/kno
 - [x] SOCKS5 / HTTP proxy and jump hosts
 - [ ] SSH agent / Pageant, keyboard-interactive (2FA)
 - [x] streamer mode: IPs and secrets hidden from screen capture, visible to you
-- [ ] SFTP, port forwarding, split panes, snippets
+- [x] SFTP file manager
+- [ ] port forwarding, split panes, snippets
 - [ ] MCP server so AI agents (Claude Code, Codex) can run commands on your servers with per-server permissions
 - [ ] macOS and Linux, Android
 

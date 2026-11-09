@@ -58,8 +58,12 @@ pub enum Input {
     Resize(GridSize),
     /// Skip the wait before the next reconnect attempt.
     RetryNow,
+    /// Open an SFTP channel inside this connection (for the file manager).
+    OpenSftp(oneshot::Sender<Result<SftpSession, String>>),
     Close,
 }
+
+pub type SftpSession = russh_sftp::client::SftpSession;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -92,6 +96,9 @@ pub struct Shared {
     /// Title set by the remote shell through OSC 0/2.
     pub title: Option<String>,
     pub size: GridSize,
+    /// How many times the session got connected. An SFTP channel opened under an older
+    /// count died with that connection.
+    pub connects: u64,
     /// Sender into the currently running task; replaced on reconnect.
     tx: mpsc::UnboundedSender<Input>,
 }
@@ -200,6 +207,10 @@ pub struct Session {
     /// Set when the tab becomes active so the terminal grabs keyboard focus.
     pub want_focus: bool,
     pub view: crate::termview::ViewState,
+    /// The tab's file manager, created the first time it is opened.
+    pub files: Option<Box<crate::files::Files>>,
+    /// The tab shows the file manager instead of the terminal.
+    pub show_files: bool,
 }
 
 impl Session {
@@ -218,6 +229,7 @@ impl Session {
             prompt: None,
             title: None,
             size,
+            connects: 0,
             tx,
         }));
         let term = Term::new(term_config, &size, Listener { shared: shared.clone() });
@@ -230,6 +242,8 @@ impl Session {
             task: None,
             want_focus: true,
             view: Default::default(),
+            files: None,
+            show_files: false,
         };
         s.spawn(rx, rt, ctx);
         s
@@ -274,6 +288,21 @@ impl Session {
 
     pub fn status(&self) -> Status {
         self.shared.lock().status.clone()
+    }
+
+    /// Asks the connection for an SFTP channel. `None` when not connected.
+    pub fn open_sftp(&self) -> Option<oneshot::Receiver<Result<SftpSession, String>>> {
+        let sh = self.shared.lock();
+        if sh.status != Status::Connected {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        sh.tx.send(Input::OpenSftp(tx)).ok()?;
+        Some(rx)
+    }
+
+    pub fn connects(&self) -> u64 {
+        self.shared.lock().connects
     }
 
     /// While waiting to reconnect: try right away instead.
@@ -474,7 +503,7 @@ impl Task {
                     Some(Input::RetryNow) => break,
                     Some(Input::Close) | None => return false,
                     // Typing goes nowhere while offline; the size is re-sent on connect.
-                    Some(Input::Data(_)) | Some(Input::Resize(_)) => {}
+                    Some(Input::Data(_)) | Some(Input::Resize(_)) | Some(Input::OpenSftp(_)) => {}
                 },
             }
         }
@@ -508,7 +537,11 @@ impl Task {
         if now != size {
             let _ = channel.window_change(now.cols as u32, now.rows as u32, 0, 0).await;
         }
-        self.shared.lock().status = Status::Connected;
+        {
+            let mut sh = self.shared.lock();
+            sh.status = Status::Connected;
+            sh.connects += 1;
+        }
         *was_connected = true;
         self.ctx.request_repaint();
 
@@ -525,6 +558,26 @@ impl Task {
                         let _ = channel.window_change(s.cols as u32, s.rows as u32, 0, 0).await;
                     }
                     Some(Input::RetryNow) => {}
+                    Some(Input::OpenSftp(reply)) => {
+                        // The channel request is quick; the SFTP handshake runs on its own task
+                        // so the terminal keeps flowing.
+                        match handle.channel_open_session().await {
+                            Ok(ch) => match ch.request_subsystem(true, "sftp").await {
+                                Ok(()) => {
+                                    tokio::spawn(async move {
+                                        let r = SftpSession::new(ch.into_stream()).await.map_err(|e| e.to_string());
+                                        let _ = reply.send(r);
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(tr!("the server has no SFTP: {e}", e = e)));
+                                }
+                            },
+                            Err(e) => {
+                                let _ = reply.send(Err(e.to_string()));
+                            }
+                        }
+                    }
                     Some(Input::Close) | None => {
                         let _ = channel.eof().await;
                         let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;

@@ -4,6 +4,7 @@
 mod anim;
 mod app;
 mod config;
+mod files;
 mod fonts;
 mod fx;
 mod i18n;

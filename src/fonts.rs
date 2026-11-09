@@ -44,6 +44,19 @@ pub mod icon {
     pub const FOLDER: &str = "\u{f07b}";
     pub const ROUTE: &str = "\u{f0e8}";
     pub const GLOBE: &str = "\u{f0ac}";
+    pub const UP: &str = "\u{f062}";
+    pub const EYE: &str = "\u{f06e}";
+    pub const EYE_OFF: &str = "\u{f070}";
+    pub const FILE: &str = "\u{f15b}";
+    pub const LINK: &str = "\u{f0c1}";
+    pub const DOWNLOAD: &str = "\u{f019}";
+    pub const UPLOAD: &str = "\u{f093}";
+    pub const DRIVE: &str = "\u{f0a0}";
+    pub const DESKTOP: &str = "\u{f108}";
+    pub const FOLDER_PLUS: &str = "\u{f0257}";
+    pub const CARET_UP: &str = "\u{f0d8}";
+    pub const CARET_DOWN: &str = "\u{f0d7}";
+    pub const CHECK: &str = "\u{f00c}";
 }
 
 fn fonts_dir() -> PathBuf {

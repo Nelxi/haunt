@@ -68,10 +68,23 @@ pub enum Input {
     RemoteForward { bind: String, port: u16, reply: oneshot::Sender<Result<(), String>> },
     /// The tab's port forwarding rules changed.
     Tunnels(Vec<config::Tunnel>),
+    /// Run a command in its own channel (no terminal) and report what it prints.
+    /// Dropping the receiver stops it.
+    Exec { command: String, events: mpsc::UnboundedSender<ExecEvent> },
     Close,
 }
 
 pub type SftpSession = russh_sftp::client::SftpSession;
+
+/// What a command started with [`Session::exec`] does.
+#[derive(Debug)]
+pub enum ExecEvent {
+    /// Output; stdout and stderr together, in the order they came.
+    Out(Vec<u8>),
+    /// The command finished: its exit status, or the signal that killed it.
+    Exit { code: Option<u32>, signal: Option<String> },
+    Failed(String),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -351,6 +364,17 @@ impl Session {
         self.shared.lock().tunnels.values().filter(|l| l.state == crate::tunnels::State::Active).count()
     }
 
+    /// Runs `command` on the server next to the shell. `None` when not connected.
+    pub fn exec(&self, command: String) -> Option<mpsc::UnboundedReceiver<ExecEvent>> {
+        let sh = self.shared.lock();
+        if sh.status != Status::Connected {
+            return None;
+        }
+        let (events, rx) = mpsc::unbounded_channel();
+        sh.tx.send(Input::Exec { command, events }).ok()?;
+        Some(rx)
+    }
+
     pub fn connects(&self) -> u64 {
         self.shared.lock().connects
     }
@@ -558,7 +582,7 @@ impl Task {
                         self.spec.tunnels = rules;
                     }
                     // Requests for a connection that isn't there: dropping the reply says so.
-                    Some(Input::Data(_) | Input::Resize(_) | Input::OpenSftp(_) | Input::OpenDirect { .. } | Input::RemoteForward { .. }) => {}
+                    Some(Input::Data(_) | Input::Resize(_) | Input::OpenSftp(_) | Input::OpenDirect { .. } | Input::RemoteForward { .. } | Input::Exec { .. }) => {}
                 },
             }
         }
@@ -632,6 +656,10 @@ impl Task {
                             let r = h.tcpip_forward(bind, u32::from(port)).await;
                             let _ = reply.send(r.map(|_| ()).map_err(|e| e.to_string()));
                         }));
+                    }
+                    Some(Input::Exec { command, events }) => {
+                        let ctx = self.ctx.clone();
+                        pending.push(Box::pin(run_exec(h, command, events, ctx)));
                     }
                     Some(Input::Tunnels(rules)) => {
                         // Cancel first and wait for it, so a rule that moved can listen again.
@@ -1054,6 +1082,54 @@ async fn ask(
     shared.lock().prompt = Some(Prompt { kind, title: title.into(), message: message.into(), reply: tx });
     ctx.request_repaint();
     rx.await.ok().flatten()
+}
+
+/// One command in its own session channel; see [`Input::Exec`].
+async fn run_exec(h: &client::Handle<HostKeyCheck>, command: String, events: mpsc::UnboundedSender<ExecEvent>, ctx: egui::Context) {
+    let send = |e: ExecEvent| {
+        let _ = events.send(e);
+        ctx.request_repaint();
+    };
+    let mut ch = match h.channel_open_session().await {
+        Ok(ch) => ch,
+        Err(e) => return send(ExecEvent::Failed(tr!("cannot open a channel: {e}", e = e))),
+    };
+    if let Err(e) = ch.exec(true, stoppable(&command)).await {
+        return send(ExecEvent::Failed(e.to_string()));
+    }
+    let (mut code, mut signal) = (None, None);
+    loop {
+        tokio::select! {
+            msg = ch.wait() => match msg {
+                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => send(ExecEvent::Out(data.to_vec())),
+                Some(ChannelMsg::ExitStatus { exit_status }) => code = Some(exit_status),
+                Some(ChannelMsg::ExitSignal { signal_name, .. }) => signal = Some(format!("{signal_name:?}")),
+                Some(ChannelMsg::Failure) => return send(ExecEvent::Failed(tr!("the server refused to run commands").into())),
+                Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            },
+            // Stopped by the user: the end of input makes the wrapper end the command.
+            () = events.closed() => {
+                let _ = ch.eof().await;
+                let _ = ch.close().await;
+                return;
+            }
+        }
+    }
+    send(ExecEvent::Exit { code, signal });
+}
+
+/// Wraps a command so that it can be stopped.
+///
+/// Without a terminal, closing the channel leaves a quiet command (`sleep`, a hung `curl`)
+/// running, and many servers refuse SSH "signal" requests (OpenSSH 8.x answers "session
+/// signalling requires privilege separation"). So a watcher holds the channel's input and,
+/// when it ends, kills the process group, which sshd gave the command of its own. The
+/// command itself reads from /dev/null: something that asks for input fails instead of
+/// waiting forever.
+fn stoppable(command: &str) -> String {
+    const WRAP: &str = "exec 3<&0; { while read -r _; do :; done; kill -TERM 0; } <&3 >/dev/null 2>&1 & w=$!; sh -c \"$1\" </dev/null 3<&-; s=$?; kill $w 2>/dev/null; exit $s";
+    format!("sh -c '{WRAP}' haunt '{}'", command.replace('\'', r"'\''"))
 }
 
 /// Verifies the server's host key against our known_hosts file and the user's

@@ -9,6 +9,7 @@ mod fonts;
 mod fx;
 mod i18n;
 mod import;
+mod multi;
 mod platform;
 mod secrets;
 mod session;

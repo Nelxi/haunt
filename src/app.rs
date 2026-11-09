@@ -88,6 +88,7 @@ enum LaunchItem {
     Quick { user: String, host: String, port: u16 },
     NewServer,
     Settings,
+    RunOnServers,
     Import(ImportSource),
 }
 
@@ -135,6 +136,9 @@ pub struct HauntApp {
     sidebar_open: bool,
     /// The quick-connect field on the start screen.
     quick: String,
+    /// "Run on servers": its state outlives the dialog, so a run goes on while it is closed.
+    multi: crate::multi::Multi,
+    show_multi: bool,
 }
 
 impl HauntApp {
@@ -192,6 +196,8 @@ impl HauntApp {
             switch: (f64::NEG_INFINITY, 0.0, false),
             sidebar_open: true,
             quick: String::new(),
+            multi: Default::default(),
+            show_multi: false,
         };
         // Debug builds: open a screen on start for screenshot checks (no key presses needed).
         #[cfg(debug_assertions)]
@@ -204,6 +210,7 @@ impl HauntApp {
                 app.editor = Some(ed);
             }
             Ok("settings") => app.show_settings = true,
+            Ok("multi") => app.show_multi = true,
             Ok("launcher") => app.launcher = Some(Launcher { query: String::new(), selected: 0 }),
             Ok("connect") | Ok("files") | Ok("tunnels") => {
                 if let Some(s) = app.cfg.servers.first().cloned() {
@@ -354,6 +361,7 @@ impl HauntApp {
             || self.show_settings
             || self.confirm_delete.is_some()
             || self.launcher.is_some()
+            || self.show_multi
             || self.active_prompt()
             || self.sessions.get(self.active).is_some_and(|s| s.page == crate::session::Page::Files && s.files.as_ref().is_some_and(|f| f.modal_open()))
     }
@@ -459,7 +467,7 @@ impl HauntApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump, streamer, files, tunnels) = ctx.input_mut(|i| {
+        let (next, prev, close, dup, new_server, settings, launcher, sidebar, jump, streamer, files, tunnels, multi) = ctx.input_mut(|i| {
             let jump = digits.iter().position(|k| i.consume_key(Modifiers::CTRL, *k));
             (
                 i.consume_key(Modifiers::CTRL, Key::Tab),
@@ -474,6 +482,7 @@ impl HauntApp {
                 i.consume_key(cs, Key::S),
                 i.consume_key(cs, Key::F),
                 i.consume_key(cs, Key::U),
+                i.consume_key(cs, Key::E),
             )
         });
         if files {
@@ -481,6 +490,9 @@ impl HauntApp {
         }
         if tunnels {
             self.toggle_page(crate::session::Page::Tunnels);
+        }
+        if multi {
+            self.show_multi = !self.show_multi;
         }
         let n = self.sessions.len();
         if n > 0 && next {
@@ -823,6 +835,7 @@ impl HauntApp {
         let mut delete: Option<Uuid> = None;
         let mut add = false;
         let mut open_settings = false;
+        let mut run_multi = false;
         let states = self.server_states();
         let routes: HashMap<Uuid, String> = self.cfg.servers.iter().filter_map(|s| route_label(s, &self.cfg.servers).map(|r| (s.id, r))).collect();
 
@@ -847,6 +860,19 @@ impl HauntApp {
             let pr = ui.scope_builder(UiBuilder::new().max_rect(plus), |ui| widgets::icon_button(ui, t, icon::PLUS, plus.size(), false)).inner;
             if pr.on_hover_text(tr!("New server  (Ctrl+Shift+N)")).clicked() {
                 add = true;
+            }
+            if !self.cfg.servers.is_empty() {
+                let run = plus.translate(vec2(-32.0, 0.0));
+                let busy = self.multi.busy();
+                let rr = ui.scope_builder(UiBuilder::new().max_rect(run), |ui| widgets::icon_button(ui, t, icon::BOLT, run.size(), false)).inner;
+                if busy {
+                    let pulse = 0.5 + 0.5 * (now * 4.0).sin().abs() as f32;
+                    ui.painter().circle_filled(pos2(run.max.x - 6.0, run.min.y + 6.0), 3.0, t.accent.gamma_multiply(pulse));
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                if rr.on_hover_text(tr!("Run on servers  (Ctrl+Shift+E)")).clicked() {
+                    run_multi = true;
+                }
             }
             ui.add_space(12.0);
             widgets::input(ui, t, &mut self.search, tr!("Search servers"), false, icon::SEARCH);
@@ -935,6 +961,9 @@ impl HauntApp {
         }
         if open_settings {
             self.show_settings = true;
+        }
+        if run_multi {
+            self.show_multi = true;
         }
         if let Some(s) = edit {
             self.editor = Some(Editor::new(s, false));
@@ -1527,6 +1556,59 @@ impl HauntApp {
         }
     }
 
+    fn multi_dialog(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if !self.show_multi {
+            self.opened.remove("multi");
+            return;
+        }
+        let t = self.theme();
+        let opened = self.opened_at("multi", now);
+        let out = self.multi.show(ctx, t, opened, &self.cfg.servers, &self.sessions);
+        if out.run {
+            self.start_multi(ctx);
+        }
+        if let Some(tab) = out.open_tab
+            && let Some(i) = self.sessions.iter().position(|s| s.id == tab)
+        {
+            self.activate(i);
+            self.show_multi = false;
+        }
+        if out.close {
+            self.show_multi = false;
+        }
+    }
+
+    /// Runs the dialog's command on the picked servers, each through a tab of its own: an
+    /// open one if there is one, else a new tab that opens in the background.
+    fn start_multi(&mut self, ctx: &egui::Context) {
+        let active = self.active;
+        let had_tabs = !self.sessions.is_empty();
+        let mut targets = Vec::new();
+        for id in self.multi.picked().to_vec() {
+            let Some(server) = self.cfg.servers.iter().find(|s| s.id == id).cloned() else { continue };
+            let open = self
+                .sessions
+                .iter()
+                .filter(|s| s.spec.server_id == Some(id) && !matches!(s.status(), Status::Closed(_)))
+                .min_by_key(|s| s.status() != Status::Connected)
+                .map(|s| s.id);
+            let tab = match open {
+                Some(tab) => tab,
+                None => {
+                    self.connect(ctx, &server);
+                    self.sessions.last().map_or(0, |s| s.id)
+                }
+            };
+            targets.push((server.display_name().to_string(), tab));
+        }
+        if had_tabs {
+            self.active = active;
+        }
+        self.multi.begin(targets);
+        self.multi.tick(&self.sessions);
+    }
+
     fn settings_dialog(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         if !self.show_settings {
@@ -1755,6 +1837,7 @@ impl HauntApp {
                         }
                         LaunchItem::NewServer => (icon::PLUS.to_string(), tr!("New server").into(), "Ctrl+Shift+N".into(), t.ok),
                         LaunchItem::Settings => (icon::GEAR.to_string(), tr!("Settings").into(), "Ctrl+,".into(), t.subtext),
+                        LaunchItem::RunOnServers => (icon::BOLT.to_string(), tr!("Run on servers").into(), "Ctrl+Shift+E".into(), t.accent),
                         LaunchItem::Import(ImportSource::Putty) => (icon::FOLDER.to_string(), tr!("Import from PuTTY").into(), tr!("saved sessions in the registry").into(), t.subtext),
                         LaunchItem::Import(ImportSource::SshConfig) => (icon::FOLDER.to_string(), tr!("Import from ~/.ssh/config").into(), tr!("Host blocks").into(), t.subtext),
                     };
@@ -1817,6 +1900,7 @@ impl HauntApp {
                 }
                 Some(LaunchItem::NewServer) => self.editor = Some(Editor::new(Server::new(), true)),
                 Some(LaunchItem::Settings) => self.show_settings = true,
+                Some(LaunchItem::RunOnServers) => self.show_multi = true,
                 Some(LaunchItem::Import(src)) => self.import_sessions(ctx, src),
                 None => {}
             }
@@ -2083,6 +2167,8 @@ impl eframe::App for HauntApp {
         self.delete_dialog(&ctx);
         self.settings_dialog(&ctx);
         self.launcher_dialog(&ctx);
+        self.multi.tick(&self.sessions);
+        self.multi_dialog(&ctx);
         self.draw_toasts(&ctx);
         self.veil_overlay(&ctx, frame);
         if self.started == Some(now) {
@@ -2113,7 +2199,7 @@ fn veiled_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color3
     }
 }
 
-fn dialog_header(ui: &mut egui::Ui, t: &Theme, ic: &str, title: &str) {
+pub(crate) fn dialog_header(ui: &mut egui::Ui, t: &Theme, ic: &str, title: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     let p = ui.painter();
     let badge = Rect::from_min_size(r.min, vec2(40.0, 40.0));
@@ -2245,6 +2331,9 @@ fn launcher_items(servers: &[Server], query: &str) -> Vec<LaunchItem> {
     }
     if q.is_empty() || "settings".contains(&q) || tr!("Settings").to_lowercase().contains(&q) {
         items.push(LaunchItem::Settings);
+    }
+    if !servers.is_empty() && (q.is_empty() || "run command on servers".contains(&q) || tr!("Run on servers").to_lowercase().contains(&q)) {
+        items.push(LaunchItem::RunOnServers);
     }
     if !q.is_empty() && ("import putty".contains(&q) || q.starts_with("imp") || tr!("Import from PuTTY").to_lowercase().contains(&q)) {
         items.push(LaunchItem::Import(ImportSource::Putty));

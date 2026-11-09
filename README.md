@@ -43,6 +43,7 @@ like a riced Hyprland desktop.
 **Files**
 - FileZilla-style **SFTP manager** in every tab (`Ctrl Shift F`): this PC on the left, the server on the right, over the tab's own connection, so proxies and jump hosts just work and it reopens itself after a reconnect
 - **Port forwarding** per server (`Ctrl Shift U`): local (`-L`), remote (`-R`) and a SOCKS proxy (`-D`) that also speaks SOCKS4 and HTTP, so a browser can go online through the server. Rules start with every connection and after a reconnect, show live connections and traffic, and can be opened to the local network
+- **Run on servers** (`Ctrl Shift E`): one command on any set of servers at once, each in a card with its own live output, exit code and time; Stop ends the command on the servers too, recent commands are a click away
 - drag files between panes or straight from Explorer; a queue with progress, speed and time left; cancel any transfer, half-written files are cleaned up
 - whole folders both ways, rename, new folder, delete (to the Recycle Bin on your side), sort by name/size/date, hidden files toggle, keyboard: arrows, Enter, Backspace, Tab, F2, F5, F7, Del
 
@@ -88,6 +89,7 @@ Needs Rust 1.85+ and the MSVC toolchain (Visual Studio Build Tools).
 | `Ctrl ,` | settings |
 | `Ctrl Shift F` | files (SFTP) / back to the terminal |
 | `Ctrl Shift U` | tunnels (port forwarding) / back to the terminal |
+| `Ctrl Shift E` | run a command on several servers |
 | `Ctrl Shift C` / `Ctrl Shift V` | copy / paste |
 | `Shift PgUp` / `Shift PgDn` | scroll history |
 
@@ -107,6 +109,7 @@ haunt keeps its own `known_hosts` next to the config and also trusts `~/.ssh/kno
 - [x] streamer mode: IPs and secrets hidden from screen capture, visible to you
 - [x] SFTP file manager
 - [x] port forwarding: `-L`, `-R`, SOCKS / HTTP proxy
+- [x] one command on many servers at once
 - [ ] split panes, snippets
 - [ ] MCP server so AI agents (Claude Code, Codex) can run commands on your servers with per-server permissions
 - [ ] macOS and Linux, Android

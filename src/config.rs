@@ -131,6 +131,8 @@ pub struct Settings {
     pub border_animation: bool,
     /// Smooth cursor movement with a trail, like kitty's `cursor_trail`.
     pub cursor_trail: bool,
+    /// Reconnect by itself when a working connection drops (network, VPN, sleep).
+    pub auto_reconnect: bool,
     /// Master switch for UI animations.
     pub animations: bool,
     /// Streamer mode: IPs, hosts, emails and tokens are hidden from screen capture
@@ -163,6 +165,7 @@ impl Default for Settings {
             border_animation: false,
             cursor_trail: true,
             animations: true,
+            auto_reconnect: true,
             streamer_mode: true,
         }
     }

@@ -172,6 +172,10 @@ pub fn show(ui: &mut egui::Ui, s: &mut Session, look: &Look<'_>, input_enabled: 
             if reconnect {
                 action = Action::Reconnect;
             }
+        } else if matches!(status, Status::Reconnecting(_)) {
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                s.retry_now();
+            }
         } else {
             handle_keyboard(ui, s, set);
         }
@@ -943,10 +947,14 @@ fn draw_status(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, theme: &Theme
         return;
     }
     let (text, color) = match status {
-        Status::Connecting | Status::Connected => ("connecting…", theme.warn),
-        Status::Closed(_) => ("disconnected  ·  press Enter to reconnect", theme.err),
+        Status::Connecting | Status::Connected => ("connecting…".to_string(), theme.warn),
+        Status::Reconnecting(at) => {
+            let left = at.saturating_duration_since(std::time::Instant::now()).as_secs_f32().ceil() as u64;
+            (format!("connection lost  ·  reconnecting in {left} s  ·  Enter = now"), theme.warn)
+        }
+        Status::Closed(_) => ("disconnected  ·  press Enter to reconnect".to_string(), theme.err),
     };
-    let galley = painter.layout_no_wrap(text.to_string(), fonts::ui(13.0), theme.text);
+    let galley = painter.layout_no_wrap(text, fonts::ui(13.0), theme.text);
     let size = galley.size() + vec2(36.0, 14.0);
     let y = rect.max.y - 22.0 - size.y / 2.0 + (1.0 - t) * 24.0;
     let pill = Rect::from_center_size(pos2(rect.center().x, y), size);
@@ -955,12 +963,12 @@ fn draw_status(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, theme: &Theme
     fx::glow(&p, pill, size.y / 2.0, color.gamma_multiply(0.25), 16.0, 0.0);
     p.rect(pill, CornerRadius::same(255), theme.mantle, Stroke::new(1.0, color.gamma_multiply(0.8)), StrokeKind::Inside);
     let time = ui.input(|i| i.time) as f32;
-    let pulse = if matches!(status, Status::Connecting) { 0.5 + 0.5 * (time * 5.0).sin() } else { 1.0 };
+    let pulse = if matches!(status, Status::Connecting | Status::Reconnecting(_)) { 0.5 + 0.5 * (time * 5.0).sin() } else { 1.0 };
     let dot = pos2(pill.min.x + 15.0, pill.center().y);
     p.circle_filled(dot, 6.0 * pulse, color.gamma_multiply(0.25));
     p.circle_filled(dot, 3.5, color);
     p.galley(pill.min + vec2(26.0, 7.0), galley, theme.text);
-    if matches!(status, Status::Connecting) {
+    if matches!(status, Status::Connecting | Status::Reconnecting(_)) {
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 }

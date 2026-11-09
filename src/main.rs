@@ -38,7 +38,8 @@ fn main() -> eframe::Result {
             .with_inner_size([1180.0, 740.0])
             .with_min_inner_size([620.0, 380.0])
             .with_transparent(true)
-            .with_decorations(false),
+            .with_decorations(false)
+            .with_icon(app_icon()),
         ..Default::default()
     };
 
@@ -49,6 +50,12 @@ fn main() -> eframe::Result {
     );
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     result
+}
+
+/// The ghost from the title bar, for the taskbar and Alt+Tab (the .exe gets the same
+/// picture as a resource, see build.rs).
+fn app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).unwrap_or_default()
 }
 
 /// When launched from a terminal, attach to it so `RUST_LOG` output is visible.

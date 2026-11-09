@@ -8,6 +8,7 @@
 //! title change go through the listener). The UI must therefore never lock `term` while
 //! holding `shared`.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -53,6 +54,8 @@ impl Dimensions for GridSize {
 pub enum Input {
     Data(Vec<u8>),
     Resize(GridSize),
+    /// Skip the wait before the next reconnect attempt.
+    RetryNow,
     Close,
 }
 
@@ -60,6 +63,8 @@ pub enum Input {
 pub enum Status {
     Connecting,
     Connected,
+    /// The connection dropped; the next attempt starts at this moment.
+    Reconnecting(std::time::Instant),
     Closed(String),
 }
 
@@ -121,6 +126,8 @@ pub struct ConnectSpec {
     pub keepalive: Duration,
     /// What sits between us and the host (resolved from the server's [`Proxy`]).
     pub via: Option<Box<Via>>,
+    /// Reconnect by itself when an established connection drops.
+    pub reconnect: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +172,7 @@ impl ConnectSpec {
             auth: s.auth.clone(),
             keepalive: Duration::from_secs(keepalive_secs.max(5)),
             via: via.map(Box::new),
+            reconnect: false,
         }
     }
 
@@ -231,6 +239,8 @@ impl Session {
             out: Output { parser: Processor::new(), term: self.term.clone(), ctx: ctx.clone() },
             shared: self.shared.clone(),
             ctx: ctx.clone(),
+            secrets: HashMap::new(),
+            authenticating: false,
         };
         self.task = Some(rt.spawn(task.run(rx)));
     }
@@ -262,6 +272,11 @@ impl Session {
 
     pub fn status(&self) -> Status {
         self.shared.lock().status.clone()
+    }
+
+    /// While waiting to reconnect: try right away instead.
+    pub fn retry_now(&self) {
+        let _ = self.shared.lock().tx.send(Input::RetryNow);
     }
 
     /// Resize the local grid and tell the server. Cheap no-op if the size is unchanged.
@@ -329,22 +344,105 @@ struct Task {
     out: Output,
     shared: Arc<Mutex<Shared>>,
     ctx: egui::Context,
+    /// Passwords and passphrases that worked in this tab, so an automatic reconnect does
+    /// not ask again. Lives only as long as the tab.
+    secrets: HashMap<String, String>,
+    /// Set once the transport is up and login starts: failures after this point are
+    /// about credentials, and retrying them blindly would only lock the account.
+    authenticating: bool,
+}
+
+/// How a session that got connected came to an end.
+enum End {
+    /// The tab was closed.
+    Closed,
+    /// The remote shell ended (exit, logout, the server closed the channel).
+    Exited(String),
+    /// The connection itself died: network, keepalive timeout, reset.
+    Lost(String),
+}
+
+/// An error that must not be retried automatically (host key problems).
+#[derive(Debug)]
+struct Fatal(String);
+
+impl std::fmt::Display for Fatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Fatal {}
+
+fn is_fatal(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Fatal>())
+}
+
+/// Seconds to wait before each reconnect attempt; the last one repeats.
+const BACKOFF: [u64; 7] = [1, 2, 4, 8, 15, 30, 60];
+
+/// A human reason for a dropped connection, from the error the SSH session ended with.
+fn lost_reason(e: &anyhow::Error, keepalive: Duration) -> String {
+    match e.downcast_ref::<russh::Error>() {
+        Some(russh::Error::KeepaliveTimeout) => {
+            format!("connection lost: the server stopped answering ({} s without a reply)", keepalive.as_secs() * 3)
+        }
+        Some(russh::Error::HUP) | Some(russh::Error::Disconnect) => "connection lost: the server closed it".into(),
+        Some(russh::Error::IO(io))
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            "connection lost: the network connection was cut".into()
+        }
+        Some(russh::Error::IO(io)) => format!("connection lost: {io}"),
+        _ => format!("connection lost: {e:#}"),
+    }
 }
 
 impl Task {
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Input>) {
-        self.out.info(&format!("connecting to {} …", self.spec.route()));
-        let reason = match self.session(&mut rx).await {
-            Ok(reason) => {
-                self.out.info(&format!("\r\n{reason}"));
-                reason
+        let mut was_connected = false;
+        let mut failures = 0usize;
+        loop {
+            let route = self.spec.route();
+            self.out.info(&if was_connected { format!("reconnecting to {route} …") } else { format!("connecting to {route} …") });
+            self.authenticating = false;
+            let (reason, retry) = match self.session(&mut rx, &mut was_connected).await {
+                Ok(End::Closed) => {
+                    self.finish("session closed".into());
+                    return;
+                }
+                Ok(End::Exited(reason)) => {
+                    self.out.info(&format!("\r\n{reason}"));
+                    (reason, false)
+                }
+                Ok(End::Lost(reason)) => {
+                    self.out.error(&reason);
+                    failures = 0;
+                    (reason, self.spec.reconnect)
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    self.out.error(&msg);
+                    // Only keep trying for a session that worked before, and only while the
+                    // problem is getting there (network, proxy), not logging in.
+                    let retry = was_connected && self.spec.reconnect && !self.authenticating && !is_fatal(&e);
+                    (msg, retry)
+                }
+            };
+            if !retry || !self.wait_to_reconnect(&mut rx, &mut failures).await {
+                self.finish(reason);
+                return;
             }
-            Err(e) => {
-                let msg = format!("{e:#}");
-                self.out.error(&msg);
-                msg
-            }
-        };
+        }
+    }
+
+    fn finish(&mut self, reason: String) {
         let mut sh = self.shared.lock();
         sh.status = Status::Closed(reason);
         sh.prompt = None;
@@ -352,7 +450,38 @@ impl Task {
         self.ctx.request_repaint();
     }
 
-    async fn session(&mut self, rx: &mut mpsc::UnboundedReceiver<Input>) -> Result<String> {
+    /// Waits out the backoff. False when the tab was closed meanwhile.
+    async fn wait_to_reconnect(&mut self, rx: &mut mpsc::UnboundedReceiver<Input>, failures: &mut usize) -> bool {
+        let secs = BACKOFF[(*failures).min(BACKOFF.len() - 1)];
+        *failures += 1;
+        let at = std::time::Instant::now() + Duration::from_secs(secs);
+        {
+            let mut sh = self.shared.lock();
+            sh.status = Status::Reconnecting(at);
+            sh.prompt = None;
+        }
+        self.out.info(&format!("reconnecting in {secs} s  ·  Enter to retry now"));
+        let deadline = tokio::time::Instant::from_std(at);
+        loop {
+            // Tick once a second so the countdown on screen stays current.
+            self.ctx.request_repaint();
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                input = rx.recv() => match input {
+                    Some(Input::RetryNow) => break,
+                    Some(Input::Close) | None => return false,
+                    // Typing goes nowhere while offline; the size is re-sent on connect.
+                    Some(Input::Data(_)) | Some(Input::Resize(_)) => {}
+                },
+            }
+        }
+        self.shared.lock().status = Status::Connecting;
+        self.ctx.request_repaint();
+        true
+    }
+
+    async fn session(&mut self, rx: &mut mpsc::UnboundedReceiver<Input>, was_connected: &mut bool) -> Result<End> {
         let spec = self.spec.clone();
         if spec.host.is_empty() {
             bail!("no host set");
@@ -360,7 +489,7 @@ impl Task {
 
         // Jump hosts stay alive as long as the session: its traffic runs through them.
         let mut hops = Vec::new();
-        let handle = self.open(&spec, &mut hops).await?;
+        let mut handle = self.open(&spec, &mut hops).await?;
 
         let channel = handle.channel_open_session().await.context("cannot open a session channel")?;
         let size = self.shared.lock().size;
@@ -372,11 +501,20 @@ impl Task {
         let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
         channel.request_shell(false).await.context("shell request failed")?;
 
+        // The grid may have been resized while we were offline.
+        let now = self.shared.lock().size;
+        if now != size {
+            let _ = channel.window_change(now.cols as u32, now.rows as u32, 0, 0).await;
+        }
         self.shared.lock().status = Status::Connected;
+        *was_connected = true;
         self.ctx.request_repaint();
 
         let mut channel = channel;
         let mut exit_status: Option<u32> = None;
+        // True when the server ended the channel (the shell exited); false when the whole
+        // connection vanished under us.
+        let mut ended_by_server = false;
         loop {
             tokio::select! {
                 input = rx.recv() => match input {
@@ -384,28 +522,44 @@ impl Task {
                     Some(Input::Resize(s)) => {
                         let _ = channel.window_change(s.cols as u32, s.rows as u32, 0, 0).await;
                     }
+                    Some(Input::RetryNow) => {}
                     Some(Input::Close) | None => {
                         let _ = channel.eof().await;
                         let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
                         close_hops(hops).await;
-                        return Ok("session closed".into());
+                        return Ok(End::Closed);
                     }
                 },
                 msg = channel.wait() => match msg {
                     Some(ChannelMsg::Data { data }) => self.out.feed(&data),
                     Some(ChannelMsg::ExtendedData { data, .. }) => self.out.feed(&data),
                     Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
-                    Some(ChannelMsg::Close) | None => break,
+                    Some(ChannelMsg::Close) => {
+                        ended_by_server = true;
+                        break;
+                    }
+                    None => break,
                     _ => {}
                 },
             }
         }
-        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+
+        if ended_by_server || exit_status.is_some() {
+            let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+            close_hops(hops).await;
+            return Ok(End::Exited(match exit_status {
+                Some(0) | None => "session ended".into(),
+                Some(code) => format!("session ended (exit status {code})"),
+            }));
+        }
+        // The channel vanished without a goodbye: the SSH session itself is over. Its
+        // result says why (keepalive timeout, reset, ...).
+        let reason = match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
+            Ok(Err(e)) => lost_reason(&e, spec.keepalive),
+            _ => "connection lost".into(),
+        };
         close_hops(hops).await;
-        Ok(match exit_status {
-            Some(0) | None => "connection closed".into(),
-            Some(code) => format!("connection closed (exit status {code})"),
-        })
+        Ok(End::Lost(reason))
     }
 
     /// Reaches `spec`'s host (through its proxy chain), does the handshake and logs in.
@@ -429,7 +583,7 @@ impl Task {
                     socks5(&mut s, &spec.host, spec.port, user, pass.as_ref().map(|p| p.0.as_str()))
                         .await
                         .with_context(|| format!("SOCKS5 proxy {host}:{port}"))?;
-                    self.remember_proxy(spec, pass);
+                    self.remember_proxy(spec, user, host, *port, pass);
                     Box::new(s)
                 }
                 Some(Via::Http { host, port, user }) => {
@@ -439,7 +593,7 @@ impl Task {
                     http_connect(&mut s, &spec.host, spec.port, user, pass.as_ref().map(|p| p.0.as_str()))
                         .await
                         .with_context(|| format!("HTTP proxy {host}:{port}"))?;
-                    self.remember_proxy(spec, pass);
+                    self.remember_proxy(spec, user, host, *port, pass);
                     Box::new(s)
                 }
                 Some(Via::Jump(j)) => {
@@ -470,7 +624,9 @@ impl Task {
             let mut handle = client::connect_stream(config, stream, handler)
                 .await
                 .with_context(|| format!("SSH handshake with {} failed", spec.host))?;
+            self.authenticating = true;
             self.authenticate(&mut handle, spec).await?;
+            self.authenticating = false;
             Ok(handle)
         })
     }
@@ -479,6 +635,9 @@ impl Task {
     async fn proxy_password(&self, spec: &ConnectSpec, user: &str, host: &str, port: u16) -> Result<Option<(String, bool)>> {
         if user.is_empty() {
             return Ok(None);
+        }
+        if let Some(p) = self.secrets.get(&format!("proxy {user}@{host}:{port}")) {
+            return Ok(Some((p.clone(), false)));
         }
         if let Some(p) = spec.server_id.and_then(secrets::get_proxy) {
             return Ok(Some((p, false)));
@@ -491,7 +650,10 @@ impl Task {
         Ok(Some(r))
     }
 
-    fn remember_proxy(&mut self, spec: &ConnectSpec, pass: Option<(String, bool)>) {
+    fn remember_proxy(&mut self, spec: &ConnectSpec, user: &str, host: &str, port: u16, pass: Option<(String, bool)>) {
+        if let Some((p, _)) = &pass {
+            self.secrets.insert(format!("proxy {user}@{host}:{port}"), p.clone());
+        }
         if let (Some((p, true)), Some(id)) = (pass, spec.server_id)
             && let Err(e) = secrets::set_proxy(id, &p) {
                 self.out.error(&format!("could not save the proxy password: {e}"));
@@ -513,7 +675,8 @@ impl Task {
                 Ok(())
             }
             Auth::Password => {
-                let mut saved = spec.server_id.and_then(secrets::get);
+                let cache_key = format!("password {}@{}:{}", spec.user, spec.host, spec.port);
+                let mut saved = self.secrets.get(&cache_key).cloned().or_else(|| spec.server_id.and_then(secrets::get));
                 for attempt in 0..3 {
                     let from_store = saved.is_some();
                     let (password, remember) = match saved.take() {
@@ -531,6 +694,7 @@ impl Task {
                     };
                     let res = handle.authenticate_password(&spec.user, &password).await?;
                     if res.success() {
+                        self.secrets.insert(cache_key, password.clone());
                         if remember
                             && let Some(id) = spec.server_id
                                 && let Err(e) = secrets::set(id, &password) {
@@ -556,8 +720,10 @@ impl Task {
             Ok(k) => return Ok(k),
             Err(e) => e,
         };
-        // Encrypted key (or unreadable). Try the saved passphrase, then ask.
-        let mut saved = server_id.and_then(secrets::get);
+        // Encrypted key (or unreadable). Try the passphrase from earlier in this tab, the
+        // saved one, then ask.
+        let cache_key = format!("passphrase {}", path.display());
+        let mut saved = self.secrets.get(&cache_key).cloned().or_else(|| server_id.and_then(secrets::get));
         for attempt in 0..3 {
             let (pass, remember) = match saved.take() {
                 Some(p) => (p, false),
@@ -574,6 +740,7 @@ impl Task {
                 }
             };
             if let Ok(k) = russh::keys::decode_secret_key(&text, Some(&pass)) {
+                self.secrets.insert(cache_key, pass.clone());
                 if remember
                     && let Some(id) = server_id {
                         let _ = secrets::set(id, &pass);
@@ -767,7 +934,7 @@ impl client::Handler for HostKeyCheck {
         let fingerprint = key.fingerprint(HashAlg::Sha256);
 
         let changed = |line: usize, file: &str| {
-            anyhow!(
+            anyhow::Error::new(Fatal(format!(
                 "HOST KEY CHANGED for {}:{} (recorded in {file}, line {line}).\n\
                  New key: {} {fingerprint}\n\
                  This can mean someone is intercepting the connection. If the server was \
@@ -775,7 +942,7 @@ impl client::Handler for HostKeyCheck {
                 self.host,
                 self.port,
                 key.algorithm(),
-            )
+            )))
         };
 
         if let Some(path) = &ours {
@@ -808,7 +975,7 @@ impl client::Handler for HostKeyCheck {
                     }
                 Ok(true)
             }
-            None => bail!("host key not trusted, connection aborted"),
+            None => Err(Fatal("host key not trusted, connection aborted".into()).into()),
         }
     }
 }
@@ -899,5 +1066,24 @@ mod tests {
         });
         let e = http_connect(&mut client, "h", 22, "", None).await.unwrap_err();
         assert!(e.to_string().contains("407"));
+    }
+
+    #[test]
+    fn dropped_connections_get_a_plain_reason() {
+        let ka = Duration::from_secs(30);
+        let r = lost_reason(&anyhow::Error::from(russh::Error::KeepaliveTimeout), ka);
+        assert!(r.contains("stopped answering") && r.contains("90 s"), "{r}");
+        let eof = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "early eof");
+        let r = lost_reason(&anyhow::Error::from(russh::Error::IO(eof)), ka);
+        assert!(r.contains("was cut"), "{r}");
+        let r = lost_reason(&anyhow::Error::from(russh::Error::HUP), ka);
+        assert!(r.contains("closed it"), "{r}");
+    }
+
+    #[test]
+    fn host_key_errors_are_never_retried() {
+        let e = anyhow::Error::new(Fatal("HOST KEY CHANGED".into())).context("SSH handshake with h failed");
+        assert!(is_fatal(&e));
+        assert!(!is_fatal(&anyhow!("cannot reach h:22")));
     }
 }

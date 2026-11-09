@@ -202,6 +202,11 @@ impl HauntApp {
             }
             Ok("settings") => app.show_settings = true,
             Ok("launcher") => app.launcher = Some(Launcher { query: String::new(), selected: 0 }),
+            Ok("connect") => {
+                if let Some(s) = app.cfg.servers.first().cloned() {
+                    app.connect(&cc.egui_ctx, &s);
+                }
+            }
             _ => {}
         }
         if let Some(e) = load_error {
@@ -288,7 +293,8 @@ impl HauntApp {
         }
     }
 
-    fn open_spec(&mut self, ctx: &egui::Context, label: String, spec: ConnectSpec) {
+    fn open_spec(&mut self, ctx: &egui::Context, label: String, mut spec: ConnectSpec) {
+        spec.reconnect = self.cfg.settings.auto_reconnect;
         let id = self.next_id;
         self.next_id += 1;
         let session = Session::start(id, label, spec, self.term_config(), &self.rt, ctx);
@@ -637,11 +643,11 @@ impl HauntApp {
             let text_color = mix(mix(t.subtext, t.text, hov), t.text, act);
             let dot = match status {
                 Status::Connected => t.ok,
-                Status::Connecting => t.warn,
+                Status::Connecting | Status::Reconnecting(_) => t.warn,
                 Status::Closed(_) => t.err,
             };
             let dot_c = pos2(rect.min.x + 16.0, rect.center().y);
-            if matches!(status, Status::Connecting) {
+            if matches!(status, Status::Connecting | Status::Reconnecting(_)) {
                 let pulse = 0.5 + 0.5 * (now as f32 * 5.0).sin();
                 painter.circle_filled(dot_c, 3.0 + pulse * 3.0, dot.gamma_multiply(0.25 * (1.0 - pulse)));
             } else if matches!(status, Status::Connected) {
@@ -1090,6 +1096,7 @@ impl HauntApp {
                     auth: Auth::Password,
                     keepalive: Duration::from_secs(self.cfg.settings.keepalive_secs),
                     via: None,
+                    reconnect: false,
                 };
                 self.open_spec(&ctx, format!("{user}@{host}"), spec);
             } else if !q.is_empty() {
@@ -1520,6 +1527,7 @@ impl HauntApp {
                 widgets::section(ui, t, icon::PLUG, "Behaviour");
                 widgets::toggle(ui, t, &mut s.copy_on_select, "Copy on select", "");
                 widgets::toggle(ui, t, &mut s.right_click_paste, "Right click pastes", "Copies instead when text is selected");
+                widgets::toggle(ui, t, &mut s.auto_reconnect, "Reconnect automatically", "When a working connection drops, try again with growing pauses");
                 let mut ka = s.keepalive_secs as f32;
                 slider(ui, t, "Keepalive", &mut ka, 0.0..=120.0, 5.0, "s, 0 = off");
                 s.keepalive_secs = ka as u64;
@@ -1679,6 +1687,7 @@ impl HauntApp {
                         auth: Auth::Password,
                         keepalive: Duration::from_secs(self.cfg.settings.keepalive_secs),
                         via: None,
+                        reconnect: false,
                     };
                     self.open_spec(ctx, format!("{user}@{host}"), spec);
                 }
@@ -2077,7 +2086,7 @@ fn launcher_items(servers: &[Server], query: &str) -> Vec<LaunchItem> {
 fn status_color(t: &Theme, st: Option<&Status>) -> Option<Color32> {
     match st? {
         Status::Connected => Some(t.ok),
-        Status::Connecting => Some(t.warn),
+        Status::Connecting | Status::Reconnecting(_) => Some(t.warn),
         Status::Closed(_) => Some(t.err),
     }
 }

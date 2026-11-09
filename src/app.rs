@@ -1678,7 +1678,9 @@ impl HauntApp {
                     };
                     let active = k == l.selected;
                     let cy = row.center().y;
-                    let badge = Rect::from_center_size(pos2(row.min.x + 24.0, cy), vec2(32.0, 32.0));
+                    // The badge and the Enter cap keep the same inset from the row's edges.
+                    let inset = 8.0;
+                    let badge = Rect::from_min_size(pos2(row.min.x + inset, cy - 16.0), vec2(32.0, 32.0));
                     p.rect_filled(badge, 10.0, color.gamma_multiply(if active { 0.16 } else { 0.08 }));
                     fx::glyph(p, badge.center(), &ic, fonts::mono(13.0), color);
                     let tf = fonts::medium(13.5);
@@ -1688,7 +1690,8 @@ impl HauntApp {
                     veil::text_auto(p, pos2(tx, cy - 8.0 + fx::text_dy(p, &tf)), Align2::LEFT_CENTER, &title, tf, title_c, t.surface);
                     veil::text_auto(p, pos2(tx, cy + 9.0 + fx::text_dy(p, &sf)), Align2::LEFT_CENTER, &sub, sf, t.subtext, t.surface);
                     if active {
-                        fx::kbd(p, pos2(row.max.x - 12.0 - 44.0, cy), "Enter", t.subtext, Color32::from_white_alpha(22));
+                        let w = fx::kbd_width(p, "Enter");
+                        fx::kbd(p, pos2(row.max.x - inset - w, cy), "Enter", t.subtext, Color32::from_white_alpha(22));
                     }
                 }
             } else {

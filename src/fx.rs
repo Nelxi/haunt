@@ -177,12 +177,16 @@ pub fn glyph(painter: &egui::Painter, center: Pos2, icon: &str, font: egui::Font
 /// line gap, so `*_CENTER` text sits visibly off next to icons). Add it to the y of any
 /// `Align2::*_CENTER` text.
 pub fn text_dy(painter: &egui::Painter, font: &egui::FontId) -> f32 {
-    let galley = painter.layout_no_wrap("H".into(), font.clone(), Color32::WHITE);
+    // Most words are lowercase after the first letter, so their visual mass sits lower than
+    // the capitals. Aim halfway between the cap-height centre and the x-height centre: a
+    // capitalised word then reads as centred next to an icon or inside a plate.
+    let galley = painter.layout_no_wrap("Hx".into(), font.clone(), Color32::WHITE);
     let Some(row) = galley.rows.first() else { return 0.0 };
-    let Some(g) = row.glyphs.first() else { return 0.0 };
-    let cap_top = row.pos.y + g.pos.y + g.uv_rect.offset.y;
-    let baseline = row.pos.y + g.pos.y;
-    let optical = (cap_top + baseline) / 2.0;
+    let (Some(h), Some(x)) = (row.glyphs.first(), row.glyphs.get(1)) else { return 0.0 };
+    let baseline = row.pos.y + h.pos.y;
+    let cap_top = baseline + h.uv_rect.offset.y;
+    let x_top = row.pos.y + x.pos.y + x.uv_rect.offset.y;
+    let optical = ((cap_top + baseline) / 2.0 + (x_top + baseline) / 2.0) / 2.0;
     galley.size().y / 2.0 - optical
 }
 
@@ -315,12 +319,17 @@ pub fn shadow(painter: &egui::Painter, rect: Rect, radius: f32, strength: f32) {
     painter.add(s.as_shape(rect, CornerRadius::same(radius.clamp(0.0, 255.0) as u8)));
 }
 
+/// Width of the key cap [`kbd`] draws for `key`.
+pub fn kbd_width(painter: &egui::Painter, key: &str) -> f32 {
+    let g = painter.layout_no_wrap(key.to_string(), egui::FontId::monospace(10.5), Color32::WHITE);
+    (g.size().x + 12.0).max(20.0).round()
+}
+
 /// A key cap ("Ctrl", "K"): mono text in a small hairline box, vertically centred on
 /// `left_center`. Returns its width.
 pub fn kbd(painter: &egui::Painter, left_center: Pos2, key: &str, fg: Color32, line: Color32) -> f32 {
     let font = egui::FontId::monospace(10.5);
-    let g = painter.layout_no_wrap(key.to_string(), font.clone(), fg);
-    let w = (g.size().x + 12.0).max(20.0).round();
+    let w = kbd_width(painter, key);
     let r = Rect::from_min_size(pos2(left_center.x, left_center.y - 10.0), vec2(w, 20.0));
     painter.rect(r, CornerRadius::same(6), Color32::from_white_alpha(5), Stroke::new(1.0, line), StrokeKind::Inside);
     text(painter, r.center(), egui::Align2::CENTER_CENTER, key, font, fg);
